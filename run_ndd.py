@@ -141,8 +141,10 @@ def epiminder_simulate(raw):
 
 montage_dict = {
     'full': STANDARD_BIPOLAR,
+    'ceribell': ['Fp1-F7','F7-T3','T3-T5','T5-O1','Fp2-F8','F8-T4','T4-T6','T6-O2'],
     'epiminder_simulate': lambda raw: epiminder_simulate(raw), 
     'epiminder_2': ['C3-P3', 'C4-P4'],
+    'epiminder_4': ['C3-P3', 'C4-P4', 'T3-T5', 'T4-T6'],
     'uneeg_diag_bilateral_front': lambda df: custom_bipolar(df, ['F3-T3', 'F4-T4']), 
     'uneeg_diag_left_front': lambda df: custom_bipolar(df, ['F3-T3']),
     'uneeg_diag_right_front': lambda df: custom_bipolar(df, ['F4-T4']),
@@ -231,10 +233,11 @@ def preprocess_signal(data_df_montage, fs_raw):
 
 def process_patient_dataset(patient_id, sz_files, ii_files, montage_key, prob_folder, force):
     all_files = sorted(sz_files + ii_files)
-    
+
     if not force:
         pending_files = [f for f in all_files if not os.path.exists(os.path.join(prob_folder, montage_key, os.path.basename(f).replace('.edf', '.csv')))]
-        if not pending_files: return
+        if not pending_files:
+            return  # All outputs already exist for this patient/montage; nothing to do
     
     # --- TRAINING STEP (First 60s of Earliest Interictal with valid channels) ---
     # Try interictal files in order, fall back to seizure files if all interictal fail.
@@ -284,10 +287,14 @@ def process_patient_dataset(patient_id, sz_files, ii_files, montage_key, prob_fo
         try:
             raw, df_raw, label_df, fs_raw = load_edf_file(file_name)
             data_df_montage = _get_montage_data(df_raw, raw, montage_key)
-            if data_df_montage.shape[1] == 0: continue
-            
+            if data_df_montage.shape[1] == 0:
+                print(f"  [{patient_id}:{montage_key}] Skipping {base_name}: no valid channels for this montage")
+                continue
+
             data_ndd_final = preprocess_signal(data_df_montage, fs_raw)
-            if data_ndd_final is None: continue
+            if data_ndd_final is None:
+                print(f"  [{patient_id}:{montage_key}] Skipping {base_name}: preprocessing returned None")
+                continue
             
             sz_prob_df = model(data_ndd_final) 
             sz_prob_df = sz_prob_df.apply(lambda col: clean_array(col.values, col.name), axis=0)
@@ -319,7 +326,7 @@ def process_patient_dataset(patient_id, sz_files, ii_files, montage_key, prob_fo
             pred_df.to_csv(output_file)
             
         except Exception as e:
-            print(f"  Error inferring {base_name}: {e}")
+            print(f"  [{patient_id}:{montage_key}] Error inferring {base_name}: {e}")
             continue
     del model; gc.collect()
 
