@@ -1,49 +1,56 @@
 import numpy as np
 import pandas as pd
 import scipy
-from scipy.signal import butter,filtfilt,sosfiltfilt
+from scipy.signal import butter, filtfilt, sosfiltfilt
 import re
-from os.path import join as ospj
 import mne
+
 
 # UTILITY FUNCTIONS
 def load_edf_file(file_name):
     raw = mne.io.read_raw_edf(file_name, preload=True, verbose=0)
-    fs = raw.info['sfreq']
-    df = raw.to_data_frame().set_index('time')
+    fs = raw.info["sfreq"]
+    df = raw.to_data_frame().set_index("time")
     times = raw.times
     annotations = raw.annotations
     label = np.zeros(len(times)).astype(int)
     if annotations:
         for anno in annotations:
-            sz_onset = anno['onset']
-            sz_dura = anno['duration']
+            sz_onset = anno["onset"]
+            sz_dura = anno["duration"]
             sz_end = sz_onset + sz_dura
             label[(times >= sz_onset) & (times <= sz_end)] = 1
-    label_df = pd.DataFrame({'time': times, 'labels': label})
+    label_df = pd.DataFrame({"time": times, "labels": label})
     return raw, df, label_df, fs
+
 
 ## FEATURE EXTRACTION
 def num_wins(xLen, fs, winLen, winDisp):
-  return int(((xLen/fs - winLen + winDisp) - ((xLen/fs - winLen + winDisp)%winDisp))/winDisp)
+    return int(
+        ((xLen / fs - winLen + winDisp) - ((xLen / fs - winLen + winDisp) % winDisp))
+        / winDisp
+    )
 
-def MovingWinClips(x,fs,winLen,winDisp):
-  # calculate number of windows and initialize receiver
-  nWins = num_wins(len(x),fs,winLen,winDisp)
-  samples = np.empty((nWins,int(winLen*fs)))
-  # create window indices - these windows are left aligned
-  idxs = np.array([(winDisp*fs*i,(winLen+winDisp*i)*fs)\
-                   for i in range(nWins)]).astype(int)
-  # apply feature function to each channel
-  for i in range(idxs.shape[0]):
-    samples[i,:] = x[idxs[i,0]:idxs[i,1]]
-  
-  return samples
-    
+
+def MovingWinClips(x, fs, winLen, winDisp):
+    # calculate number of windows and initialize receiver
+    nWins = num_wins(len(x), fs, winLen, winDisp)
+    samples = np.empty((nWins, int(winLen * fs)))
+    # create window indices - these windows are left aligned
+    idxs = np.array(
+        [(winDisp * fs * i, (winLen + winDisp * i) * fs) for i in range(nWins)]
+    ).astype(int)
+    # apply feature function to each channel
+    for i in range(idxs.shape[0]):
+        samples[i, :] = x[idxs[i, 0] : idxs[i, 1]]
+
+    return samples
+
+
 ## ————————————————CHANNEL PREPROCESSING————————————————
 
 
-def clean_labels(channel_li) :
+def clean_labels(channel_li):
     """
     Clean and standardize channel labels.
 
@@ -117,9 +124,9 @@ def check_channel_type(channel_li):
         "PZ",
         "FPZ",
     ]
-    ekg = ["EKG","ECG"]
+    ekg = ["EKG", "ECG"]
     emg = ["EMG"]
-    eog = ['LOC','ROC']
+    eog = ["LOC", "ROC"]
     other = ["RATE"]
 
     if isinstance(channel_li, str):
@@ -167,7 +174,8 @@ def check_channel_type(channel_li):
             ch_df.loc[group.index.to_list(), "type"] = "seeg"
     return ch_df["type"].to_numpy()
 
-def detect_bad_channels_eeg(data,fs):
+
+def detect_bad_channels_eeg(data, fs):
     values = data.copy()
     which_chs = np.arange(values.shape[1])
     ## Parameters to reject super high variance
@@ -190,22 +198,22 @@ def detect_bad_channels_eeg(data,fs):
     flat_ch = []
     high_var_ch = []
     noisy_ch = []
-    all_std = np.empty((len(which_chs),1))
+    all_std = np.empty((len(which_chs), 1))
     all_std[:] = np.nan
     details = {}
 
-    for i in range(len(which_chs)):       
+    for i in range(len(which_chs)):
         ich = which_chs[i]
-        eeg = values[:,ich]
+        eeg = values[:, ich]
         bl = np.nanmedian(eeg)
         all_std[i] = np.nanstd(eeg)
-        
+
         ## Remove channels with nans in more than half
-        if sum(np.isnan(eeg)) > 0.5*len(eeg):
+        if sum(np.isnan(eeg)) > 0.5 * len(eeg):
             bad.append(ich)
             nan_ch.append(ich)
             continue
-        
+
         ## Remove channels with zeros in more than half
         if sum(eeg == 0) > (0.5 * len(eeg)):
             bad.append(ich)
@@ -213,40 +221,42 @@ def detect_bad_channels_eeg(data,fs):
             continue
 
         ## Remove channels with extended flat-lining
-        if (sum(np.diff(eeg,1) == 0) > (0.5 * len(eeg))):
+        if sum(np.diff(eeg, 1) == 0) > (0.5 * len(eeg)):
             bad.append(ich)
             flat_ch.append(ich)
             continue
-        
+
         ## Remove channels with too many above absolute thresh
-        if sum(abs(eeg - bl) > abs_thresh) + sum(abs(eeg) > abs_thresh2) > 0.1*len(eeg):
+        if sum(abs(eeg - bl) > abs_thresh) + sum(abs(eeg) > abs_thresh2) > 0.1 * len(
+            eeg
+        ):
             bad.append(ich)
             high_ch.append(ich)
             continue
 
         ## Remove channels if there are rare cases of super high variance above baseline (disconnection, moving, popping)
-        pct = np.percentile(eeg,[100-tile,tile])
-        thresh = [bl - mult*(bl-pct[0]), bl + mult*(pct[1]-bl)]
+        pct = np.percentile(eeg, [100 - tile, tile])
+        thresh = [bl - mult * (bl - pct[0]), bl + mult * (pct[1] - bl)]
         sum_outside = sum(((eeg > thresh[1]) + (eeg < thresh[0])) > 0)
         if sum_outside >= num_above:
             bad.append(ich)
             high_var_ch.append(ich)
             continue
-        
+
         ## Remove channels with a lot of 60 Hz noise, suggesting poor impedance
         # Calculate fft
-        Y = np.fft.fft(eeg-np.nanmean(eeg))
-        
+        Y = np.fft.fft(eeg - np.nanmean(eeg))
+
         # Get power
-        P = abs(Y)**2
-        freqs = np.linspace(0,fs,len(P)+1)
+        P = abs(Y) ** 2
+        freqs = np.linspace(0, fs, len(P) + 1)
         freqs = freqs[:-1]
-        
+
         # Take first half
-        P = P[:np.ceil(len(P)/2).astype(int)]
-        freqs = freqs[:np.ceil(len(freqs)/2).astype(int)]
-        
-        P_60Hz = sum(P[(freqs > 58) * (freqs < 62)])/sum(P)
+        P = P[: np.ceil(len(P) / 2).astype(int)]
+        freqs = freqs[: np.ceil(len(freqs) / 2).astype(int)]
+
+        P_60Hz = sum(P[(freqs > 58) * (freqs < 62)]) / sum(P)
         if P_60Hz > percent_60_hz:
             bad.append(ich)
             noisy_ch.append(ich)
@@ -257,25 +267,25 @@ def detect_bad_channels_eeg(data,fs):
     higher_std = which_chs[(all_std > (mult_std * median_std)).squeeze()]
     bad_std = higher_std
 
-    channel_mask = np.ones((values.shape[1],),dtype=bool)
+    channel_mask = np.ones((values.shape[1],), dtype=bool)
     channel_mask[bad] = False
-    details['noisy'] = noisy_ch
-    details['nans'] = nan_ch
-    details['zeros'] = zero_ch
-    details['flat'] = flat_ch
-    details['var'] = high_var_ch
-    details['higher_std'] = bad_std
-    details['high_voltage'] = high_ch
-    
-    return channel_mask,details
+    details["noisy"] = noisy_ch
+    details["nans"] = nan_ch
+    details["zeros"] = zero_ch
+    details["flat"] = flat_ch
+    details["var"] = high_var_ch
+    details["higher_std"] = bad_std
+    details["high_voltage"] = high_ch
+
+    return channel_mask, details
 
 
-def detect_bad_channels(data,fs,lf_stim = False):
-    '''
+def detect_bad_channels(data, fs, lf_stim=False):
+    """
     data: raw EEG traces after filtering (i think)
     fs: sampling frequency
     channel_labels: string labels of channels to use
-    '''
+    """
     values = data.copy()
     which_chs = np.arange(values.shape[1])
     ## Parameters to reject super high variance
@@ -297,22 +307,22 @@ def detect_bad_channels(data,fs,lf_stim = False):
     flat_ch = []
     high_var_ch = []
     noisy_ch = []
-    all_std = np.empty((len(which_chs),1))
+    all_std = np.empty((len(which_chs), 1))
     all_std[:] = np.nan
     details = {}
 
-    for i in range(len(which_chs)):       
+    for i in range(len(which_chs)):
         ich = which_chs[i]
-        eeg = values[:,ich]
+        eeg = values[:, ich]
         bl = np.nanmedian(eeg)
         all_std[i] = np.nanstd(eeg)
-        
+
         ## Remove channels with nans in more than half
-        if sum(np.isnan(eeg)) > 0.5*len(eeg):
+        if sum(np.isnan(eeg)) > 0.5 * len(eeg):
             bad.append(ich)
             nan_ch.append(ich)
             continue
-        
+
         ## Remove channels with zeros in more than half
         if sum(eeg == 0) > (0.5 * len(eeg)):
             bad.append(ich)
@@ -323,7 +333,7 @@ def detect_bad_channels(data,fs,lf_stim = False):
         # if (sum(np.diff(eeg,1) <= 1e-3) > (0.5 * len(eeg))):
         #     bad.append(ich)
         #     flat_ch.append(ich)
-        
+
         ## Remove channels with too many above absolute thresh
         if sum(abs(eeg - bl) > abs_thresh) > 10:
             if not lf_stim:
@@ -332,29 +342,29 @@ def detect_bad_channels(data,fs,lf_stim = False):
             continue
 
         ## Remove channels if there are rare cases of super high variance above baseline (disconnection, moving, popping)
-        pct = np.percentile(eeg,[100-tile,tile])
-        thresh = [bl - mult*(bl-pct[0]), bl + mult*(pct[1]-bl)]
+        pct = np.percentile(eeg, [100 - tile, tile])
+        thresh = [bl - mult * (bl - pct[0]), bl + mult * (pct[1] - bl)]
         sum_outside = sum(((eeg > thresh[1]) + (eeg < thresh[0])) > 0)
         if sum_outside >= num_above:
             if not lf_stim:
                 bad.append(ich)
             high_var_ch.append(ich)
             continue
-        
+
         ## Remove channels with a lot of 60 Hz noise, suggesting poor impedance
         # Calculate fft
-        Y = np.fft.fft(eeg-np.nanmean(eeg))
-        
+        Y = np.fft.fft(eeg - np.nanmean(eeg))
+
         # Get power
-        P = abs(Y)**2
-        freqs = np.linspace(0,fs,len(P)+1)
+        P = abs(Y) ** 2
+        freqs = np.linspace(0, fs, len(P) + 1)
         freqs = freqs[:-1]
-        
+
         # Take first half
-        P = P[:np.ceil(len(P)/2).astype(int)]
-        freqs = freqs[:np.ceil(len(freqs)/2).astype(int)]
-        
-        P_60Hz = sum(P[(freqs > 58) * (freqs < 62)])/sum(P)
+        P = P[: np.ceil(len(P) / 2).astype(int)]
+        freqs = freqs[: np.ceil(len(freqs) / 2).astype(int)]
+
+        P_60Hz = sum(P[(freqs > 58) * (freqs < 62)]) / sum(P)
         if P_60Hz > percent_60_hz:
             bad.append(ich)
             noisy_ch.append(ich)
@@ -367,18 +377,18 @@ def detect_bad_channels(data,fs,lf_stim = False):
     #     if ch not in bad:
     #         if ~lf_stim:
     #             bad.append(ch)
-    channel_mask = np.ones((values.shape[1],),dtype=bool)
+    channel_mask = np.ones((values.shape[1],), dtype=bool)
     channel_mask[bad] = False
     channel_mask[higher_std] = False
-    details['noisy'] = noisy_ch
-    details['nans'] = nan_ch
-    details['zeros'] = zero_ch
-    details['flat'] = flat_ch
-    details['var'] = high_var_ch
-    details['higher_std'] = np.where(higher_std)[0].tolist()
-    details['high_voltage'] = high_ch
-    
-    return channel_mask,details
+    details["noisy"] = noisy_ch
+    details["nans"] = nan_ch
+    details["zeros"] = zero_ch
+    details["flat"] = flat_ch
+    details["var"] = high_var_ch
+    details["higher_std"] = np.where(higher_std)[0].tolist()
+    details["high_voltage"] = high_ch
+
+    return channel_mask, details
 
 
 def bipolar_montage_ieeg(ch_list):
@@ -412,30 +422,68 @@ def bipolar_montage_ieeg(ch_list):
             ch3exists = np.where(ch_list == ch3)[0]
             if len(ch3exists) > 0:
                 ch3Ind = ch3exists[0]
-            else:  
+            else:
                 ch3Ind = np.nan
             if np.isnan(ch2Ind):
                 if not np.isnan(ch3Ind):
-                    bipolar_idx.append([ch1Ind,ch3Ind, np.nan])
+                    bipolar_idx.append([ch1Ind, ch3Ind, np.nan])
                     bipolar_labels.append(ch + "-" + ch3)
             else:
-                bipolar_idx.append([ch1Ind,ch2Ind,ch3Ind])
+                bipolar_idx.append([ch1Ind, ch2Ind, ch3Ind])
                 bipolar_labels.append(ch + "-" + ch2)
     return np.array(bipolar_labels), np.array(bipolar_idx)
 
+
 def bipolar_montage_eeg(ch_list):
 
-    ch_dict = {ch:i for i,ch in enumerate(ch_list)}
-    ch1 = ['Fp1','F7','T3','T5','Fp2','F8','T4','T6',
-                    'Fp1','F3','C3','P3','Fp2','F4','C4','P4','Fz','Cz']
-    ch2 = ['F7','T3','T5','O1','F8','T4','T6','O2',
-                    'F3','C3','P3','O1','F4','C4','P4','O2','Cz','Pz']
+    ch_dict = {ch: i for i, ch in enumerate(ch_list)}
+    ch1 = [
+        "Fp1",
+        "F7",
+        "T3",
+        "T5",
+        "Fp2",
+        "F8",
+        "T4",
+        "T6",
+        "Fp1",
+        "F3",
+        "C3",
+        "P3",
+        "Fp2",
+        "F4",
+        "C4",
+        "P4",
+        "Fz",
+        "Cz",
+    ]
+    ch2 = [
+        "F7",
+        "T3",
+        "T5",
+        "O1",
+        "F8",
+        "T4",
+        "T6",
+        "O2",
+        "F3",
+        "C3",
+        "P3",
+        "O1",
+        "F4",
+        "C4",
+        "P4",
+        "O2",
+        "Cz",
+        "Pz",
+    ]
     ch1_index = [ch_dict.get(ch, np.nan) for ch in ch1]
     ch2_index = [ch_dict.get(ch, np.nan) for ch in ch2]
-    bipolar_index = np.array([ch1_index,ch2_index]).T
+    bipolar_index = np.array([ch1_index, ch2_index]).T
     bipolar_labels = [f"{ch1[i]}-{ch2[i]}" for i in range(len(ch1))]
-    nan_mask = np.any(np.isnan(bipolar_index),axis=1)
-    return np.array(bipolar_labels)[~nan_mask],bipolar_index[~nan_mask].astype(int)
+    nan_mask = np.any(np.isnan(bipolar_index), axis=1)
+    return np.array(bipolar_labels)[~nan_mask], bipolar_index[~nan_mask].astype(int)
+
 
 def car(data):
     """
@@ -444,21 +492,26 @@ def car(data):
     out_data = data - np.nanmean(data, 1)[:, np.newaxis]
     return out_data
 
+
 def bipolar(data, bipolar_index):
-    out_data = data[:,bipolar_index[:,0]] - data[:,bipolar_index[:,1]]
+    out_data = data[:, bipolar_index[:, 0]] - data[:, bipolar_index[:, 1]]
     return out_data
+
 
 ## ————————————SIGNAL PREPROCESSING——————————————
 
-def downsample(data,fs,target):
-    signal_len = int(data.shape[0]/fs*target)
-    data_bpd = scipy.signal.resample(data,signal_len,axis=0)
+
+def downsample(data, fs, target):
+    signal_len = int(data.shape[0] / fs * target)
+    data_bpd = scipy.signal.resample(data, signal_len, axis=0)
     return data_bpd
+
 
 # def interp_resample(time,data,target):
 #     signal_len = int(data.shape[0]/fs*target)
 #     data_bpd = sc.signal.resample(data,signal_len,axis=0)
 #     return data_bpd,target
+
 
 def notch_filter(data, fs):
     """_summary_
@@ -471,15 +524,16 @@ def notch_filter(data, fs):
         np.array: _description_
     """
     # remove 60Hz noise
-    b, a = butter(4,(58,62),'bandstop',fs=fs)
-    d, c = butter(4,(118,122),'bandstop',fs=fs)
+    b, a = butter(4, (58, 62), "bandstop", fs=fs)
+    d, c = butter(4, (118, 122), "bandstop", fs=fs)
 
     data_filt = filtfilt(b, a, data, axis=0)
-    data_filt_filt = filtfilt(d, c, data_filt, axis = 0)
+    data_filt_filt = filtfilt(d, c, data_filt, axis=0)
     # TODO: add option for causal filter
     # TODO: add optional argument for order
 
     return data_filt_filt
+
 
 def bandpass_filter(data, fs, order=3, lo=1, hi=150):
     """_summary_
@@ -500,6 +554,7 @@ def bandpass_filter(data, fs, order=3, lo=1, hi=150):
     data_filt = sosfiltfilt(sos, data, axis=0)
     return data_filt
 
+
 def ar_one(data):
     """
     The ar_one function fits an AR(1) model to the data and retains the residual as
@@ -516,14 +571,16 @@ def ar_one(data):
     # Retrieve data attributes
     n_samp, n_chan = data.shape
     # Apply AR(1)
-    data_white = np.zeros((n_samp-1, n_chan))
+    data_white = np.zeros((n_samp - 1, n_chan))
     for i in range(n_chan):
-        win_x = np.vstack((data[:-1, i], np.ones(n_samp-1)))
+        win_x = np.vstack((data[:-1, i], np.ones(n_samp - 1)))
         w = np.linalg.lstsq(win_x.T, data[1:, i], rcond=None)[0]
-        data_white[:, i] = data[1:, i] - (data[:-1, i]*w[0] + w[1])
+        data_white[:, i] = data[1:, i] - (data[:-1, i] * w[0] + w[1])
     return data_white
 
+
 from sklearn.linear_model import LinearRegression
+
 
 def pre_whiten(data):
     """Pre-whiten the input data using linear regression.
@@ -547,16 +604,18 @@ def pre_whiten(data):
 
     return prewhite_data
 
-#——————————————————————somewhat feature related——————————————————————————————-
+
+# ——————————————————————somewhat feature related——————————————————————————————-
 from scipy.signal import welch
 from scipy.integrate import simpson
+
 
 def bandpower(
     data,
     fs,
     band,
-    win_size = None,
-    relative = False,
+    win_size=None,
+    relative=False,
 ):
     """Adapted from https://raphaelvallat.com/bandpower.html
     Compute the average power of the signal x in a specific frequency band.
@@ -585,7 +644,7 @@ def bandpower(
     assert len(band) == 2, "CNTtools:invalidBandRange"
     assert band[0] < band[1], "CNTtools:invalidBandRange"
     if np.ndim(data) == 1:
-        data = data[:,np.newaxis]
+        data = data[:, np.newaxis]
     nchan = data.shape[1]
     bp = np.nan * np.zeros(nchan)
     low, high = band
@@ -617,9 +676,7 @@ def bandpower(
     return bp
 
 
-
-
-class Preprocessor():
+class Preprocessor:
     """
     Do basic preprocessing for a data batch
     1. Bandpass filter 0.5-100 Hz
@@ -631,11 +688,14 @@ class Preprocessor():
     7. Return the processed data in data frame, with other metadata saved in a dictionary
 
     User can retrieve either the rerefed data, or other metadata fields through get_last_packet method.
-    
+
     Note for interface with Azure, can insert database writing after filter, two rereferencing, and prewhiten, and also for bad masks
     May need a "patient" column to specify which patient the data is from
     """
-    def __init__(self, lowcut = 0.5, highcut = 100, artifact_perc = 0.2, batch = False, batch_size = 1):
+
+    def __init__(
+        self, lowcut=0.5, highcut=100, artifact_perc=0.2, batch=False, batch_size=1
+    ):
         self.chs = None
         self.n_chs = None
         self.lowcut = lowcut
@@ -649,52 +709,61 @@ class Preprocessor():
 
     def _filter_data(self, data):
         # bandpass filter
-        data = bandpass_filter(data, self.fs, lo = self.lowcut, hi = self.highcut)
+        data = bandpass_filter(data, self.fs, lo=self.lowcut, hi=self.highcut)
         data = notch_filter(data, self.fs)
         return data
 
     def fit(self, info):
-        self.fs = info['samplingFreq']
-        self.fs_raw = info['samplingFreqRaw']
-        
-        self.batch_sample_raw = int(self.fs_raw*self.batch_size) 
-        self.batch_sample = int(self.fs*self.batch_size)
-        self.sample_step = self.batch_sample_raw//self.batch_sample
-        
-        self.raw_chs = info['channelNames']
-        self.nchs = info['numberOfChannels']
-        if self.nchs != len(info['channelNames']):
-            self.raw_chs = info['channelNames'][:self.nchs]
+        self.fs = info["samplingFreq"]
+        self.fs_raw = info["samplingFreqRaw"]
+
+        self.batch_sample_raw = int(self.fs_raw * self.batch_size)
+        self.batch_sample = int(self.fs * self.batch_size)
+        self.sample_step = self.batch_sample_raw // self.batch_sample
+
+        self.raw_chs = info["channelNames"]
+        self.nchs = info["numberOfChannels"]
+        if self.nchs != len(info["channelNames"]):
+            self.raw_chs = info["channelNames"][: self.nchs]
         self.chs = clean_labels(self.raw_chs)
-        self.type = info['studyType']
+        self.type = info["studyType"]
         self.ch_type = check_channel_type(self.chs)
-        self.ieeg_idx = [True if i == 'seeg' or i == 'ecog' or i == 'ieeg' else False for i in self.ch_type ]
-        self.eeg_idx = [True if i == 'eeg' else False for i in self.ch_type ]
-        self.ekg_idx = [True if i == 'ekg' else False for i in self.ch_type ]
-        self.eog_idx = [True if i == 'eog' else False for i in self.ch_type ]
-        self.sleep_idx = [True if i == 'C3' or i == 'C4' or i == 'Cz' else False for i in self.chs]
+        self.ieeg_idx = [
+            True if i == "seeg" or i == "ecog" or i == "ieeg" else False
+            for i in self.ch_type
+        ]
+        self.eeg_idx = [True if i == "eeg" else False for i in self.ch_type]
+        self.ekg_idx = [True if i == "ekg" else False for i in self.ch_type]
+        self.eog_idx = [True if i == "eog" else False for i in self.ch_type]
+        self.sleep_idx = [
+            True if i == "C3" or i == "C4" or i == "Cz" else False for i in self.chs
+        ]
         if not self.type:
             if np.sum(self.eeg_idx) >= 15:
-                self.type = 'eeg'
+                self.type = "eeg"
             elif np.sum(self.ieeg_idx) >= 10:
-                self.type = 'ieeg'
-                
-        if self.type.lower() == 'ieeg':# not sure what's the code for intracranial
+                self.type = "ieeg"
+
+        if self.type.lower() == "ieeg":  # not sure what's the code for intracranial
             self.nchs_eeg = np.sum(self.ieeg_idx)
-            self.bipolar_labels, self.bipolar_idx = bipolar_montage_ieeg(self.chs[self.ieeg_idx])
+            self.bipolar_labels, self.bipolar_idx = bipolar_montage_ieeg(
+                self.chs[self.ieeg_idx]
+            )
             self.nchs_bipolar = len(self.bipolar_labels)
             self.down_fs = 512
             self.highcut = 250
-        elif self.type.lower() == 'eeg':
+        elif self.type.lower() == "eeg":
             self.nchs_eeg = np.sum(self.eeg_idx)
-            self.bipolar_labels, self.bipolar_idx = bipolar_montage_eeg(self.chs[self.eeg_idx])
+            self.bipolar_labels, self.bipolar_idx = bipolar_montage_eeg(
+                self.chs[self.eeg_idx]
+            )
             self.nchs_bipolar = len(self.bipolar_labels)
             self.down_fs = 200
         self.fitted = True
-    
-    def preprocess(self, data, last_batch_ind = 0):
+
+    def preprocess(self, data, last_batch_ind=0):
         """
-        Do actual preprocess. 
+        Do actual preprocess.
 
         Args:
             data (pd.Dataframe): A pd.dataframe with columns being channel names, and two index, the first being seconds from start, the second being stamps
@@ -705,7 +774,9 @@ class Preprocessor():
             _type_: _description_
         """
         assert self.fitted == True, "Processor not fitted yet"
-        assert data.shape[1] == self.nchs, "Data has different number of channels than fitted processor"
+        assert data.shape[1] == self.nchs, (
+            "Data has different number of channels than fitted processor"
+        )
         # if self.batch:
         #     batches = self.get_batches(data, last_batch_ind)
         # else:
@@ -735,16 +806,16 @@ class Preprocessor():
 
         processed = self._filter_data(data)
         raw_filtered = pd.DataFrame(processed, columns=self.chs, index=index)
-        if self.type == 'eeg':
-            eeg_data = processed[:,self.eeg_idx]
+        if self.type == "eeg":
+            eeg_data = processed[:, self.eeg_idx]
             eeg_chs = self.chs[self.eeg_idx]
             bad_mask, details = detect_bad_channels_eeg(eeg_data, self.fs)
-            artifact_perc = np.sum(bad_mask == False)/self.nchs_eeg
-        elif self.type == 'ieeg':
-            eeg_data = processed[:,self.ieeg_idx]
+            artifact_perc = np.sum(bad_mask == False) / self.nchs_eeg
+        elif self.type == "ieeg":
+            eeg_data = processed[:, self.ieeg_idx]
             eeg_chs = self.chs[self.ieeg_idx]
-            bad_mask, details  = detect_bad_channels(eeg_data, self.fs)
-            artifact_perc = np.sum(bad_mask == False)/self.nchs_eeg
+            bad_mask, details = detect_bad_channels(eeg_data, self.fs)
+            artifact_perc = np.sum(bad_mask == False) / self.nchs_eeg
             if np.any(self.sleep_idx):
                 scalp_data = processed[:, self.eeg_idx]
                 scalp_chs = self.chs[self.eeg_idx]
@@ -757,56 +828,93 @@ class Preprocessor():
 
         # rereference
         # CAR
-        car_data = eeg_data - np.mean(eeg_data[:,bad_mask], axis = 1)[:,np.newaxis]
-        if self.type == 'ieeg' and np.any(self.sleep_idx):
-            scalp_car_data = scalp_data - np.mean(scalp_data[:,scalp_bad_mask], axis = 1)[:,np.newaxis]
-            sleep_car_data = scalp_car_data[:,sleep_scalp_idx]
-            car_data = np.concatenate([car_data, sleep_car_data], axis = 1)
+        car_data = eeg_data - np.mean(eeg_data[:, bad_mask], axis=1)[:, np.newaxis]
+        if self.type == "ieeg" and np.any(self.sleep_idx):
+            scalp_car_data = (
+                scalp_data
+                - np.mean(scalp_data[:, scalp_bad_mask], axis=1)[:, np.newaxis]
+            )
+            sleep_car_data = scalp_car_data[:, sleep_scalp_idx]
+            car_data = np.concatenate([car_data, sleep_car_data], axis=1)
             eeg_chs = np.concatenate([eeg_chs, sleep_chs])
             bad_mask = np.concatenate([bad_mask, sleep_bad_mask])
-        
+
         # BIPOLAR
         bad_ind = np.where(~bad_mask)[0]
-        if self.type == 'ieeg':
+        if self.type == "ieeg":
             tmp_bipolar_index = self.bipolar_idx.copy()
             # tmp_bipolar_index[np.isin(tmp_bipolar_index,bad_ind)] = np.nan
             for i, ch in enumerate(tmp_bipolar_index):
-                if np.isin(ch[1],bad_ind) and not np.isin(ch[2],bad_ind) and not np.isnan(ch[2]):
-                    tmp_bipolar_index[i,1] = tmp_bipolar_index[i,2]
-            tmp_bipolar_index = tmp_bipolar_index[:,:2].astype('int')
-            bipolar_data = eeg_data[:,tmp_bipolar_index[:,0]] - eeg_data[:,tmp_bipolar_index[:,1]]
-            bad_mask_bipolar = ~np.any(np.isin(tmp_bipolar_index[:,:1],bad_ind),axis=1)
+                if (
+                    np.isin(ch[1], bad_ind)
+                    and not np.isin(ch[2], bad_ind)
+                    and not np.isnan(ch[2])
+                ):
+                    tmp_bipolar_index[i, 1] = tmp_bipolar_index[i, 2]
+            tmp_bipolar_index = tmp_bipolar_index[:, :2].astype("int")
+            bipolar_data = (
+                eeg_data[:, tmp_bipolar_index[:, 0]]
+                - eeg_data[:, tmp_bipolar_index[:, 1]]
+            )
+            bad_mask_bipolar = ~np.any(
+                np.isin(tmp_bipolar_index[:, :1], bad_ind), axis=1
+            )
         else:
-            bipolar_data = eeg_data[:,self.bipolar_idx[:,0]] - eeg_data[:,self.bipolar_idx[:,1]]
-            bad_mask_bipolar = ~np.any(np.isin(self.bipolar_idx,bad_ind),axis=1)
+            bipolar_data = (
+                eeg_data[:, self.bipolar_idx[:, 0]]
+                - eeg_data[:, self.bipolar_idx[:, 1]]
+            )
+            bad_mask_bipolar = ~np.any(np.isin(self.bipolar_idx, bad_ind), axis=1)
 
-        car_data_df = pd.DataFrame(car_data, columns = eeg_chs, index=index)
-        bipolar_data_df = pd.DataFrame(bipolar_data, columns = self.bipolar_labels, index=index)
+        car_data_df = pd.DataFrame(car_data, columns=eeg_chs, index=index)
+        bipolar_data_df = pd.DataFrame(
+            bipolar_data, columns=self.bipolar_labels, index=index
+        )
 
-        car_data_prewhite = pd.DataFrame(pre_whiten(car_data), columns = eeg_chs, index=index)
-        bipolar_data_prewhite = pd.DataFrame(pre_whiten(bipolar_data), columns = self.bipolar_labels, index=index)
+        car_data_prewhite = pd.DataFrame(
+            pre_whiten(car_data), columns=eeg_chs, index=index
+        )
+        bipolar_data_prewhite = pd.DataFrame(
+            pre_whiten(bipolar_data), columns=self.bipolar_labels, index=index
+        )
 
-        ekg_data = pd.DataFrame(processed[:,self.ekg_idx], columns = self.chs[self.ekg_idx], index=index)
-        eog_data = pd.DataFrame(processed[:,self.eog_idx], columns = self.chs[self.eog_idx], index=index)
+        ekg_data = pd.DataFrame(
+            processed[:, self.ekg_idx], columns=self.chs[self.ekg_idx], index=index
+        )
+        eog_data = pd.DataFrame(
+            processed[:, self.eog_idx], columns=self.chs[self.eog_idx], index=index
+        )
 
-        car_bad = pd.DataFrame(bad_mask.reshape(1,-1), columns=eeg_chs)
-        bipolar_bad = pd.DataFrame(bad_mask_bipolar.reshape(1,-1), columns=self.bipolar_labels)
-            
-        packet = {'raw': data, 'raw_fs': self.fs, 
-                    'filtered':raw_filtered, 'fs': self.down_fs,
-                    'bad_mask': bad_mask, 'bad_details': details, 
-                    'artifact': artifact, 'artifact_perc': artifact_perc,
-                    'CAR': car_data_df, 'BIPOLAR': bipolar_data_df, 
-                    'CAR_prewhite': car_data_prewhite, 'BIPOLAR_prewhite': bipolar_data_prewhite,
-                    'CAR_bad': car_bad, 'BIPOLAR_bad': bipolar_bad,
-                    'EKG':ekg_data, 'EOG': eog_data}
-            
-            # packets.append(packet)
-            # change to database writing here
+        car_bad = pd.DataFrame(bad_mask.reshape(1, -1), columns=eeg_chs)
+        bipolar_bad = pd.DataFrame(
+            bad_mask_bipolar.reshape(1, -1), columns=self.bipolar_labels
+        )
+
+        packet = {
+            "raw": data,
+            "raw_fs": self.fs,
+            "filtered": raw_filtered,
+            "fs": self.down_fs,
+            "bad_mask": bad_mask,
+            "bad_details": details,
+            "artifact": artifact,
+            "artifact_perc": artifact_perc,
+            "CAR": car_data_df,
+            "BIPOLAR": bipolar_data_df,
+            "CAR_prewhite": car_data_prewhite,
+            "BIPOLAR_prewhite": bipolar_data_prewhite,
+            "CAR_bad": car_bad,
+            "BIPOLAR_bad": bipolar_bad,
+            "EKG": ekg_data,
+            "EOG": eog_data,
+        }
+
+        # packets.append(packet)
+        # change to database writing here
         return packet
         # else:
         #     return packets[0]
-    
+
     # def fit_preprocess(self, data, fs, ref = None):
     #     self.fit(data,fs)
     #     processed_dict = self.preprocess(data)
@@ -826,53 +934,59 @@ class Preprocessor():
 class ClipLoader:
     """
     A clip loader serves feature calculation. It links to processed database and provides new clips for each feature function.
-    One clip loader should be created per feature per patient. 
+    One clip loader should be created per feature per patient.
 
     TODO: How to deal with artifacts?
     """
-    def __init__(self, feat_config, aligned = 'right', reject_art = False):
-        self.feat_win = feat_config['win']
-        self.feat_stride = feat_config['stride']
-        self.ref = feat_config['reref']
-        self.prewhite = feat_config['prewhite']
+
+    def __init__(self, feat_config, aligned="right", reject_art=False):
+        self.feat_win = feat_config["win"]
+        self.feat_stride = feat_config["stride"]
+        self.ref = feat_config["reref"]
+        self.prewhite = feat_config["prewhite"]
         self.aligned = aligned
         self.reject_art = reject_art
         self._set_data_key()
         self.data_start_stamp = 0
-    
+
     def _set_data_key(self):
         self.data_key = self.ref
-        if self.ref == 'filtered':
-            self.bad_key = 'CAR_bad'
+        if self.ref == "filtered":
+            self.bad_key = "CAR_bad"
         else:
             if self.prewhite:
-                self.data_key += '_prewhite'
-            self.bad_key = self.ref + '_bad'
+                self.data_key += "_prewhite"
+            self.bad_key = self.ref + "_bad"
 
     def set_info(self, info):
         self.info = info
-        self.fs = info['samplingFreq']
-        self.sample_step = self.fs_raw//self.fs
-        self.win_sample = int(self.feat_win*self.fs)
-        self.stride_sample = int(self.feat_stride*self.fs)
+        self.fs = info["samplingFreq"]
+        self.sample_step = self.fs_raw // self.fs
+        self.win_sample = int(self.feat_win * self.fs)
+        self.stride_sample = int(self.feat_stride * self.fs)
 
     def set_data(self, data_df, bad_df, label):
         self.data = data_df
         self.bad_mask = bad_df
         self.label = label
-        self.win_start = self.data.index[0] # time
-        self.stamp_end = self.data.index[-1] # time
+        self.win_start = self.data.index[0]  # time
+        self.stamp_end = self.data.index[-1]  # time
 
     def get_data_start_stamp(self, last_feat_stamp):
         if last_feat_stamp is None:
             return 1
         else:
-            if self.aligned == 'right':
-                data_start_stamp = last_feat_stamp+ self.sample_step-(self.win_sample_raw)+self.stride_sample_raw
-            elif self.aligned == 'left':
+            if self.aligned == "right":
+                data_start_stamp = (
+                    last_feat_stamp
+                    + self.sample_step
+                    - (self.win_sample_raw)
+                    + self.stride_sample_raw
+                )
+            elif self.aligned == "left":
                 data_start_stamp = last_feat_stamp + self.stride_sample_raw
             return data_start_stamp
-    
+
     def __iter__(self):
         return self
 
@@ -883,13 +997,13 @@ class ClipLoader:
         win_stop = self.win_start + self.win_sample_raw - 1
         if win_stop > self.stamp_end:
             raise StopIteration  # Stop when limit is reached
-        clip_data = self.data.query(f'{self.win_start} <= stamp <= {win_stop}')
-        bad_mask = self.bad_mask.query(f'{self.win_start} <= stamp <= {win_stop}')
+        clip_data = self.data.query(f"{self.win_start} <= stamp <= {win_stop}")
+        bad_mask = self.bad_mask.query(f"{self.win_start} <= stamp <= {win_stop}")
         self.win_start = self.win_start + self.stride_sample_raw
-        if self.aligned == 'right':
-            feat_index = pd.Index([clip_data.index[-1]],name='stamp')
-        elif self.aligned == 'left':
-            feat_index = pd.Index([clip_data.index[0]],name='stamp')
+        if self.aligned == "right":
+            feat_index = pd.Index([clip_data.index[-1]], name="stamp")
+        elif self.aligned == "left":
+            feat_index = pd.Index([clip_data.index[0]], name="stamp")
         bad_mask = np.squeeze(((bad_mask == False).mean() <= 0.2).to_numpy())
         if np.sum(bad_mask == False) > 0.2 and self.reject_art:
             artifact = True
@@ -897,6 +1011,7 @@ class ClipLoader:
         else:
             artifact = False
             return feat_index, clip_data, bad_mask
+
 
 def sort_lists(a, *others, reverse=False):
     """
@@ -922,35 +1037,35 @@ def sort_lists(a, *others, reverse=False):
 
 def flatten_tableone(df):
     try:
-        new_col_names = {k: f'{k}' for k, v in df.loc['n'].to_dict(orient='records')[0].items() if v}
+        new_col_names = {
+            k: f"{k}" for k, v in df.loc["n"].to_dict(orient="records")[0].items() if v
+        }
     except KeyError:
-        new_col_names = {} # Handle case where 'n' might not be a multi-index
-        
-    if ('n', '') in df.index:
-        df = df.drop(('n', ''), axis=0)
-        
+        new_col_names = {}  # Handle case where 'n' might not be a multi-index
+
+    if ("n", "") in df.index:
+        df = df.drop(("n", ""), axis=0)
+
     new_rows = []
     for group in df.index.get_level_values(0).unique():
-        if group == 'n':
+        if group == "n":
             continue
         block = df.xs(group, level=0)
-        if 'mean' in group or 'median' in group:
+        if "mean" in group or "median" in group:
             block.index = [group]
             new_rows.append(block)
         else:
             label_row_data = [[""] * (df.shape[1] - 1) + [block.iloc[0, -1]]]
             label_row = pd.DataFrame(label_row_data, columns=df.columns, index=[group])
-            block.index = ['    ' + str(idx) for idx in block.index]
-            block.iloc[0, -1] = ''
+            block.index = ["    " + str(idx) for idx in block.index]
+            block.iloc[0, -1] = ""
             new_block = pd.concat([label_row, block])
             new_rows.append(new_block)
-            
+
     if not new_rows:
-        return pd.DataFrame(columns=df.columns) # Return empty if no data
-        
+        return pd.DataFrame(columns=df.columns)  # Return empty if no data
+
     flat_df = pd.concat(new_rows)
     flat_df.index.name = None
     flat_df = flat_df.rename(new_col_names, axis=1)
     return flat_df
-
-    

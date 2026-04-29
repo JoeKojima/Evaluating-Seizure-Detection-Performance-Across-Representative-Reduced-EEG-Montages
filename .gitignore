@@ -71,6 +71,8 @@ sparcnet_results/
 
 # DynaSD
 DynaSD-wo_dev/
+ndd_results/
+dso_results/
 
 # SVM
 svm_results/
