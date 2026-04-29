@@ -1,0 +1,71 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing / typing / lint
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment & secrets (local config)
+.env
+.env.*
+!.env.example
+
+# ML experiment / cache (if used locally)
+wandb/
+mlruns/
+lightning_logs/
+tensorboard_logs/
+
+# Logs
+*.log
+
+# macOS / AppleDouble (common on external volumes)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors
+.idea/
+*.swp
+*.swo
+*~
+
+# SPaRCNet
+SPARCNET/
+sparcnet_pretrain.pt
+DenseNetClassifier.py
+
+# DynaSD
+DynaSD-wo_dev/
