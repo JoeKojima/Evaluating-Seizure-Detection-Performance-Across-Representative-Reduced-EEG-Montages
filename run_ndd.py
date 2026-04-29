@@ -1,40 +1,38 @@
 # Functions and imports
+import argparse
 import sys
 import os
-
-# --- 0. DYNASD SETUP ---
-project_root = "DynaSD-wo_dev"
-if os.path.exists(project_root):
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-else:
-    sys.path.append(os.path.abspath("."))
-
-print("SCRIPT STARTED - Top of file", file=sys.stderr, flush=True)
-sys.stderr.flush()
-
-import argparse
-import numpy as np
-import pandas as pd
 import warnings
 import glob
-import scipy.signal
 import random
 import gc
+
+import mne
+import numpy as np
+import pandas as pd
+import scipy.signal
 from joblib import Parallel, delayed
 from tqdm import tqdm
-import mne
-import matplotlib
-
-matplotlib.use("Agg")
 import torch
 from mne.filter import filter_data
+
+# --- Setup Environment ---
+warnings.filterwarnings("ignore")
+mne.set_log_level("ERROR")
+
+# --- 0. DYNASD SETUP ---
+working_dir = os.path.abspath("")
+ndd_path = os.path.join(working_dir, "DynaSD-wo_dev")
+funcs_path = os.path.join(working_dir, "pipeline_functions")
+
+sys.path.append(working_dir)
+sys.path.append(funcs_path)
+sys.path.append(ndd_path)
 
 # --- DYNASD IMPORTS ---
 try:
     from DynaSD import NDD
     from DynaSD.utils import ar_one
-
     print("Successfully imported DynaSD components", flush=True)
 except ImportError as e:
     print(
@@ -43,57 +41,20 @@ except ImportError as e:
     )
     sys.exit(1)
 
-# --- UTILS IMPORT (Legacy support) ---
-
-WORKING_DIR = os.path.abspath("")
-PIPELINE_FUNCS_PATH = os.path.join(WORKING_DIR, "pipeline_functions")
-
-sys.path.append(WORKING_DIR)
-sys.path.append(PIPELINE_FUNCS_PATH)
+# --- Import User Dependencies ---
+# These files must exist in your 'pipeline_functions' and 'DynaSD-wo_dev' folders
 try:
     from feat_funcs import get_event_smoothed_pred, smooth_pred
-    from shared_eval import calculate_metrics_for_montages, generate_stats_tables
-    from utils import (
-        Preprocessor,
-        ieeg_get_prediction,
-        load_edf_file,
-        metric_labels,
-    )
-    from run_svm import get_optimal_thres, get_optimal_thres_f1
+    from get_metrics import calculate_metrics_for_montages, generate_stats_tables
+    from utils import Preprocessor, load_edf_file
 except ImportError as e:
     print(f"FATAL ERROR: Could not import required pipeline components. Missing: {e}")
     sys.exit(1)
 
-mne.set_log_level("ERROR")
-
-# --- 1. SETUP PIPELINE PATHS ---
-warnings.filterwarnings("ignore")
-os.environ["MPLCONFIGDIR"] = ".matplotlib_cache"
-os.makedirs(".matplotlib_cache", exist_ok=True)
-
-
 # --- 3. CONSTANTS ---
-STANDARD_BIPOLAR = [
-    "Fp1-F7",
-    "F7-T3",
-    "T3-T5",
-    "T5-O1",
-    "Fp2-F8",
-    "F8-T4",
-    "T4-T6",
-    "T6-O2",
-    "Fp1-F3",
-    "F3-C3",
-    "C3-P3",
-    "P3-O1",
-    "Fp2-F4",
-    "F4-C4",
-    "C4-P4",
-    "P4-O2",
-]
 
 # Model Settings (Updated to match run_full_pipeline.py)
-FS_NDD = 200
+FS_NDD = 256
 W_SIZE_SEC = 1
 W_STRIDE_SEC = 0.5
 TRAIN_MIN = 1
@@ -106,16 +67,6 @@ feat_setting_ndd = {
     "lowcut": 1,
     "highcut": 40,
 }
-
-metric_use = [
-    "auroc_sample",
-    "auprc_sample",
-    "recall_event",
-    "precision_event",
-    "f1_event",
-    "fp",
-]
-metric_use_labels = [metric_labels.get(k, k) for k in metric_use]
 
 montage_dict = {
     "full": [
@@ -171,6 +122,7 @@ def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
 
+set_seed(5210)
 
 def custom_bipolar(df, pairs):
     filtered = df["filtered"]
@@ -208,10 +160,7 @@ def custom_bipolar(df, pairs):
     return data
 
 
-set_seed(5210)
-
 # --- 4. DATA HANDLING HELPERS ---
-
 
 def _get_montage_data(df, raw, montage_key):
     montage_processor = montage_dict[montage_key]
@@ -255,18 +204,18 @@ def preprocess_signal(data_df_montage, fs_raw):
 
     try:
         # 1-40Hz Bandpass filter matched to SPaRCNet
-        filtered_data = filter_data(
-            eeg_data_array, fs_raw, 1.0, 40.0, method="iir", verbose=False
-        )
-        filtered_data = clean_array(filtered_data, "filtered")
+        # filtered_data = filter_data(
+        #     eeg_data_array, fs_raw, 1.0, 40.0, method="iir", verbose=False
+        # )
+        # filtered_data = clean_array(filtered_data, "filtered")
 
-        # Resample to FS_NDD (200 Hz)
-        num_samples_ndd = int(filtered_data.shape[1] / fs_raw * FS_NDD)
-        data_ndd_array = scipy.signal.resample(filtered_data, num_samples_ndd, axis=1).T
-        data_ndd_array = clean_array(data_ndd_array, "resampled")
+        # # Resample to FS_NDD (200 Hz)
+        # num_samples_ndd = int(filtered_data.shape[1] / fs_raw * FS_NDD)
+        # data_ndd_array = scipy.signal.resample(filtered_data, num_samples_ndd, axis=1).T
+        # data_ndd_array = clean_array(data_ndd_array, "resampled")
 
         # DynaSD AR(1) Whitening
-        data_whitened = ar_one(data_ndd_array)
+        data_whitened = ar_one(eeg_data_array)
         data_whitened = clean_array(data_whitened, "whitened")
 
         return pd.DataFrame(data_whitened, columns=valid_channels)
@@ -298,7 +247,7 @@ def process_patient_dataset(
 
     # --- TRAINING STEP (First 60s of Earliest Interictal with valid channels) ---
     # Try interictal files in order, fall back to seizure files if all interictal fail.
-    training_candidates = sorted(ii_files) + sorted(sz_files)
+    training_candidates = sorted(ii_files)
     if not training_candidates:
         return
 
@@ -402,11 +351,8 @@ def process_patient_dataset(
             )
 
             out_data = {
-                "SZ": sz_prob_agg,
                 "sz_prob": sz_prob_agg,
-                "label": label,
-                "pred": np.zeros(min_len),
-                "smoothed_pred": np.zeros(min_len),
+                "label": label
             }
             # Save Per-Channel Probabilities
             for col in sz_prob_df.columns:
@@ -424,7 +370,7 @@ def process_patient_dataset(
     gc.collect()
 
 
-def process_file_ndd(file_name, thres=None, avg=True):
+def process_file_pred(file_name, thres=None, avg=True):
     warnings.filterwarnings("ignore")
     out_file = os.path.join(
         pred_folder, setting_folder_name, m, file_name.split("/")[-1]
@@ -434,19 +380,16 @@ def process_file_ndd(file_name, thres=None, avg=True):
     prob_df = pd.read_csv(file_name, index_col=0)
     prob_mat = prob_df[[c for c in prob_df.columns if c.startswith("prob")]].values
     sz_prob = prob_mat.mean(axis=1)
-    if thres is None:
-        pred = ieeg_get_prediction(prob_mat, mul=1.2, gap_num=4, min_event_num=20)
+    if avg:
+        pred = (sz_prob >= thres).astype(int)
     else:
-        if avg:
-            pred = (sz_prob >= thres).astype(int)
-        else:
-            pred = (prob_mat >= thres).astype(int)
-            pred = pred.sum(axis=1) >= min(2, pred.shape[1])
-        pred = get_event_smoothed_pred(
-            smooth_pred(pred),
-            gap_num=int(4 / feat_setting_ndd["stride"]),
-            min_event_num=int(20 / feat_setting_ndd["stride"]),
-        )  # int(4/feat_setting['stride'])
+        pred = (prob_mat >= thres).astype(int)
+        pred = pred.sum(axis=1) >= min(2, pred.shape[1])
+    pred = get_event_smoothed_pred(
+        smooth_pred(pred),
+        gap_num=int(4 / feat_setting_ndd["stride"]),
+        min_event_num=int(20 / feat_setting_ndd["stride"]),
+    )  
     pred_df = pd.DataFrame(
         np.vstack([sz_prob, pred]).T, columns=["sz_prob", "pred"], index=prob_df.index
     )
@@ -490,13 +433,6 @@ if __name__ == "__main__":
     force = params["force"]
     n_jobs = params["n_jobs"]
 
-    if params["montage"] == "all":
-        montage_keys = list(montage_dict.keys())
-    else:
-        montage_keys = [
-            m.strip() for m in params["montage"].split(",") if m.strip() in montage_dict
-        ]
-
     # --- Setting Folder Name (for preds, metrics, plots) ---
     thres_val = params["thres"]
     setting_val = params["setting"]
@@ -510,16 +446,25 @@ if __name__ == "__main__":
     pred_folder = os.path.join(base_output_folder, "pred")
     metric_folder = os.path.join(base_output_folder, "metrics")
 
-    # --- Locate Files ---
+    # --- Montage List ---
+    if params["montage"] == "all":
+        montage_keys = list(montage_dict.keys())
+    else:
+        montage_keys = [
+            m.strip() for m in params["montage"].split(",") if m.strip() in montage_dict
+        ]
+    for m in montage_keys:
+        os.makedirs(os.path.join(prob_folder, m), exist_ok=True)
+
+    # Group by Patient
     try:
-        all_files = glob.glob(f"{params['data_folder']}/**/*.edf", recursive=True)
+        all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
         if not all_files:
-            print(f"Warning: No .edf files found in {params['data_folder']}")
+            print(f"Warning: No .edf files found in {base_data_folder}")
     except Exception as e:
         print(f"Error finding EDF files: {e}")
         all_files = []
 
-    # Group by Patient
     patient_map_files = {}
     for f in all_files:
         pid = os.path.basename(f).split("_")[0]
@@ -535,7 +480,7 @@ if __name__ == "__main__":
     )
 
     # --- STEP 1: Process Patients (Train & Inference) ---
-    print(f"\n{'=' * 60}\nSTEP 1: Processing Patients\n{'=' * 60}", flush=True)
+    print(f"\n--- STEP 1: Generating Probabilities ---", flush=True)
     all_tasks = []
     for m in montage_keys:
         for pid, files in patient_map_files.items():
@@ -547,7 +492,7 @@ if __name__ == "__main__":
                 )
             )
 
-    Parallel(n_jobs=params["n_jobs"])(tqdm(all_tasks, desc="Processing patients"))
+    Parallel(n_jobs=params["n_jobs"])(tqdm(all_tasks, desc="Processing patient"))
 
     # =================================================================
     # STEP 2: Generate Predictions
@@ -585,9 +530,9 @@ if __name__ == "__main__":
 
         os.makedirs(os.path.join(pred_folder, setting_folder_name, m), exist_ok=True)
 
-        with tqdm(total=len(prob_files), desc=f"Step 2/4: Predicting [{m}]") as pbar:
+        with tqdm(total=len(prob_files), desc=f"Step 2/4: Predicting: ") as pbar:
             Parallel(n_jobs=n_jobs)(
-                delayed(process_file_ndd)(file_name, current_thres)
+                delayed(process_file_pred)(file_name, current_thres)
                 for file_name in prob_files
             )
             pbar.update(len(prob_files))
@@ -618,8 +563,6 @@ if __name__ == "__main__":
         metric_folder=metric_folder,
         stats_folder=stats_folder,
         patient_map_file=patient_map_file,
-        metric_use=metric_use,
-        metric_use_labels=metric_use_labels,
     )
 
     print("\n--- Pipeline Complete ---")

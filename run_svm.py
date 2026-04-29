@@ -153,7 +153,7 @@ def process_pat(pat, group):
         }
     )
     preprocessed = prepro.preprocess(df)
-    for m in montages_to_run:
+    for m in montage_keys:
         montage_processor = MONTAGE_DICT[m]
         if isinstance(montage_processor, list):
             data_df = preprocessed["BIPOLAR"]
@@ -264,7 +264,7 @@ def get_optimal_thres_f1(prob_files, stride):
     pass
 
 
-def process_file_svm(file_name, thres=0.99, avg=True):
+def process_file_pred(file_name, thres=0.99, avg=True):
     warnings.filterwarnings("ignore")
     out_file = os.path.join(pred_folder_setting, m, file_name.split("/")[-1])
     if not force and os.path.exists(out_file):
@@ -276,8 +276,6 @@ def process_file_svm(file_name, thres=0.99, avg=True):
         pred = detect_seizure(sz_prob, threshold=thres)
     else:
         pred_mat = (prob_mat >= thres).astype(int)
-        # perc_chan = pred_mat.sum(axis=1)/pred_mat.shape[1]
-        # pred = perc_chan >= 1
         pred = pred_mat.sum(axis=1) >= min(2, pred_mat.shape[1])
     pred = get_event_smoothed_pred(
         smooth_pred(pred),
@@ -346,8 +344,8 @@ if __name__ == "__main__":
     base_data_folder = params["data_folder"]
     base_output_folder = params["output_folder"]
     patient_map_file = params["patient_info"]
-    n_jobs = params["n_jobs"]
     force = params["force"]
+    n_jobs = params["n_jobs"]
 
     # Establish dynamic settings folder name based on Youden's optimization or fixed thres
     thres_val = params["thres"]
@@ -368,12 +366,12 @@ if __name__ == "__main__":
     )
 
     if params["montage"] == "all":
-        montages_to_run = list(MONTAGE_DICT.keys())
+        montage_keys = list(MONTAGE_DICT.keys())
     else:
-        montages_to_run = [
+        montage_keys = [
             m.strip() for m in params["montage"].split(",") if m.strip() in MONTAGE_DICT
         ]
-    for m in montages_to_run:
+    for m in montage_keys:
         os.makedirs(os.path.join(prob_folder, m), exist_ok=True)
 
     try:
@@ -403,7 +401,7 @@ if __name__ == "__main__":
 
     print("\n--- STEP 2: Generating Predictions ---")
 
-    for m in montages_to_run:
+    for m in montage_keys:
         prob_files = glob.glob(os.path.join(prob_folder, m, "*.csv"))
         if not prob_files:
             continue
@@ -432,7 +430,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(pred_folder_setting, m), exist_ok=True)
         with tqdm(total=len(prob_files), desc="Processing file"):
             results = Parallel(n_jobs=40)(
-                delayed(process_file_svm)(file_name, current_thres)
+                delayed(process_file_pred)(file_name, current_thres)
                 for file_name in prob_files
             )
 
@@ -441,7 +439,7 @@ if __name__ == "__main__":
     # =================================================================
     print("\n--- STEP 3: Calculating Metrics ---")
     calculate_metrics_for_montages(
-        montage_keys=montages_to_run,
+        montage_keys=montage_keys,
         pred_folder_setting=pred_folder_setting,
         metric_folder=metric_folder_setting,
         stride=feat_setting_svm["stride"],
@@ -453,7 +451,7 @@ if __name__ == "__main__":
     # =================================================================
     print("\n--- STEP 4: Generating Stats and Plots ---")
     generate_stats_tables(
-        montage_keys=montages_to_run,
+        montage_keys=montage_keys,
         metric_folder=metric_folder_setting,
         stats_folder=stats_folder_setting,
         patient_map_file=patient_map_file,
