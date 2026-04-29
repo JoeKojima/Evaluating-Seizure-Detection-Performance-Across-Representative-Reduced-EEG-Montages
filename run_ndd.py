@@ -82,6 +82,14 @@ W_STRIDE_SEC = 0.5
 TRAIN_MIN = 1 
 TRAIN_DURATION_SEC = 60 * TRAIN_MIN 
 
+feat_setting_ndd = {
+    'win':W_SIZE_SEC,
+    'stride':W_STRIDE_SEC,
+    'reref':'BIPOLAR',
+    'lowcut':1,
+    'highcut':40
+}
+
 # --- CUSTOM MONTAGE HELPERS ---
 def custom_bipolar(df, pairs):
     filtered = df['filtered']
@@ -285,6 +293,10 @@ def process_patient_dataset(patient_id, sz_files, ii_files, montage_key, prob_fo
             continue
     del model; gc.collect()
 
+
+plot_vars = ['auroc_sample', 'auprc_sample', 'recall_event', 'precision_event', 'f1_event', 'fp']
+plot_labels = [metric_labels.get(k, k) for k in plot_vars]
+
 # =============================================================================
 # MAIN EXECUTION BLOCK
 # =============================================================================
@@ -298,17 +310,34 @@ if __name__ == '__main__':
     parser.add_argument("--force", action='store_true')
     parser.add_argument("--setting", type=str, default='') 
     parser.add_argument("--thres", type=float, default=0.5) 
-    parser.add_argument("--do_plot", action='store_true') 
+    parser.add_argument("--thres_file", type=str, default='threses_all.csv', help="File containing thresholds for each montage")
     parser.add_argument("--n_jobs", type=int, default=10)
     
     params = vars(parser.parse_args())
     print(f"Parsed arguments: {params}", flush=True)
 
+    # --- Setup Base Paths ---
+    base_data_folder = params['data_folder']
+    base_output_folder = params['output_folder']
+    patient_map_file = params['patient_info']
+    force = params['force']
+    n_jobs = params['n_jobs']
+
     if params['montage'] == 'all': montage_keys = list(montage_dict.keys())
     else: montage_keys = [m.strip() for m in params['montage'].split(',') if m.strip() in montage_dict]
     
-    prob_folder = os.path.join(params['output_folder'], 'prob')
-    metric_folder = os.path.join(params['output_folder'], 'metrics')
+    # --- Setting Folder Name (for preds, metrics, plots) ---
+    thres_val = params['thres']
+    setting_val = params['setting']
+    
+    if setting_val:
+        setting_folder_name = setting_val
+    else:
+        setting_folder_name = f"thres{thres_val:.1f}"
+
+    prob_folder = os.path.join(base_output_folder, 'prob')
+    pred_folder = os.path.join(base_output_folder, 'pred')
+    metric_folder = os.path.join(base_output_folder, 'metrics')
     
     # --- Locate Files ---
     try:
@@ -327,7 +356,7 @@ if __name__ == '__main__':
         if 'seizure' in os.path.basename(f).lower(): patient_map_files[pid]['sz'].append(f)
         else: patient_map_files[pid]['ii'].append(f)
 
-    print(f"Identified {len(patient_map_files)} unique patients.", flush=True)
+    print(f"Identified {len(patient_map_files)} unique patients admissions.", flush=True)
 
     # --- STEP 1: Process Patients (Train & Inference) ---
     print(f"\n{'='*60}\nSTEP 1: Processing Patients\n{'='*60}", flush=True)
@@ -341,82 +370,157 @@ if __name__ == '__main__':
     
     Parallel(n_jobs=params['n_jobs'])(tqdm(all_tasks, desc="Processing patients"))
     
-    # --- STEP 2: Metrics & Global Youden's J Optimization ---
-    print(f"\n{'='*60}\nSTEP 2: Global Threshold Optimization & Metrics\n{'='*60}", flush=True)
+    # =================================================================
+    # STEP 2: Generate Predictions
+    # =================================================================
+    print("\n--- STEP 2: Generating Predictions ---")
+    pred_folder = os.path.join(base_output_folder, 'pred')
+
+    for m in montage_keys:
+        print(f"Processing montage: {m}")
+        prob_files = glob.glob(os.path.join(prob_folder, m, '*.csv'))
+        if not prob_files:
+            print(f"  No probability files found for montage {m}, skipping.")
+            continue
+            
+        if 'optimal_f1' in setting_folder_name:
+            if params['thres_file']:
+                threses = pd.read_csv(params['thres_file'])
+                current_thres = threses[(threses['model']=='SPaRCNet')&(threses['montage']==m)]['thres_f1'].iloc[0]
+            else:
+                print("  Calculating optimal threshold...")
+                current_thres = get_optimal_thres_f1(prob_files)
+        elif 'optimal' in setting_folder_name:
+            if params['thres_file']:
+                threses = pd.read_csv(params['thres_file'])
+                current_thres = threses[(threses['model']=='SPaRCNet')&(threses['montage']==m)]['thres_yodenj'].iloc[0]
+            else:
+                current_thres = get_optimal_thres(prob_files)
+        else:
+            current_thres = thres_val
+        print(f"  Optimal threshold for {m}: {current_thres:.4f}")
+            
+        os.makedirs(os.path.join(pred_folder, setting_folder_name, m), exist_ok=True)
+
+        with tqdm(total=len(prob_files), desc=f'Step 2/4: Predicting [{m}]') as pbar:
+            Parallel(n_jobs=n_jobs)(delayed(process_file_pred)(file_name) for file_name in prob_files)
+            pbar.update(len(prob_files))
+
     
-    for m in tqdm(montage_keys, desc="Calculating metrics"):
-        metric_dest = os.path.join(metric_folder, m)
-        os.makedirs(metric_dest, exist_ok=True)
-        
-        pred_files = glob.glob(os.path.join(prob_folder, m, '*.csv'))
-        sz_pred_files = [f for f in pred_files if 'seizure' in os.path.basename(f).lower() or 'event' in os.path.basename(f).lower()]
-        
-        if not sz_pred_files: continue
+    # =================================================================
+    # STEP 3: Calculate Metrics (from calc_metrics.py and get_metrics.py)
+    # =================================================================
+    print("\n--- STEP 3: Calculating Metrics ---")
+    metric_folder = os.path.join(base_output_folder, 'metrics', setting_folder_name)
+    pred_folder_setting = os.path.join(pred_folder, setting_folder_name)
+    
+    for m in tqdm(montage_keys, desc='Step 3/4: Calculating Metrics'):
+        os.makedirs(os.path.join(metric_folder, m), exist_ok=True)
+        pred_files = glob.glob(os.path.join(pred_folder_setting, m, '*.csv'))
+        if not pred_files:
+            print(f"  No prediction files found for {m}. Skipping.")
+            continue
 
-        # --- A. Calculate Youden's J across ALL patients ---
-        print(f"  {m}: Optimizing threshold via Youden's J...", flush=True)
-        y_true_all = []
-        y_score_all = []
-        
-        for f in sz_pred_files:
-            try:
-                df_temp = pd.read_csv(f, usecols=['label', 'sz_prob'])
-                y_true_all.append(df_temp['label'].values)
-                y_score_all.append(df_temp['sz_prob'].values)
-            except: continue
-        
-        if not y_true_all: continue
-        
-        y_true_flat = np.concatenate(y_true_all)
-        y_score_flat = np.concatenate(y_score_all)
-        
-        # Calculate ROC and Optimal Threshold
-        fpr, tpr, thresholds = roc_curve(y_true_flat, y_score_flat)
-        j_scores = tpr - fpr
-        best_idx = np.argmax(j_scores)
-        best_thresh = thresholds[best_idx]
-        max_j = j_scores[best_idx]
-        
-        print(f"  {m}: Optimal Threshold = {best_thresh:.6f} (J={max_j:.4f})", flush=True)
-        with open(os.path.join(metric_dest, 'threshold_info.txt'), 'w') as tf:
-            tf.write(f"Global Youden's J Threshold: {best_thresh}\nMax J: {max_j}\n")
-        
-        # --- B. Re-calculate metrics ---
-        patient_metrics_list = []
-        df_files = pd.DataFrame({'file': sz_pred_files})
-        df_files['pid'] = df_files['file'].apply(lambda x: os.path.basename(x).split('_')[0])
-        
-        for pid, group in df_files.groupby('pid'):
-            seg_metrics = []
-            auc_prob, auc_label, auc_pred = [], [], []
-            
-            for f in group['file']:
-                try:
-                    df = pd.read_csv(f, index_col=0)
-                    l = df['label'].values
-                    p = df['sz_prob'].values
-                    
-                    # Apply Optimal Threshold
-                    pr_raw = (p >= best_thresh).astype(int)
-                    # Apply Manuscript-Specific Smoothing (Closing + Opening 20s)
-                    pr_smooth = smooth_predictions(pr_raw)
-                    
-                    seg_metrics.append(compute_metrics(l, pr_smooth, p))
-                    auc_prob.extend(p); auc_label.extend(l); auc_pred.extend(pr_smooth)
-                except: continue
-            
-            if not seg_metrics: continue
-            seg_df = pd.DataFrame(seg_metrics)
-            agg = compute_metrics(np.array(auc_label), np.array(auc_pred), np.array(auc_prob))
-            for col in ['avg_sz_dura', 'recall_event', 'balanced_acc', 'fp']:
-                agg[col] = seg_df[col].mean()
-            agg['num_sz'] = seg_df['num_sz'].sum()
-            agg['patient_id'] = pid
-            patient_metrics_list.append(agg)
-            
-        if patient_metrics_list:
-            final_df = pd.DataFrame(patient_metrics_list).set_index('patient_id')
-            final_df.to_csv(os.path.join(metric_dest, 'patient_metrics.csv'))
-            print(f"  {m}: Saved metrics for {len(final_df)} patients.")
+        # segment metrics
+        out_file = os.path.join(metric_folder,m,'segment_metrics.csv')
+        if not force and os.path.exists(out_file):
+            continue
+        else:
+            full_metrics = []
+            for f in pred_files:
+                pred_df = pd.read_csv(f,index_col=0)
+                label = pred_df['label'].values
+                prob = pred_df['sz_prob'].values
+                pred = pred_df['pred'].values
+                event_id = f.split('/')[-1][:-4]
+                metrics = compute_metrics(label, pred, prob, stride=feat_setting_ndd['stride'])
+                metric_row = pd.DataFrame([metrics],index=[event_id])
+                full_metrics.append(metric_row)
+            full_metrics = pd.concat(full_metrics,axis=0).sort_index()
+            full_metrics[['precision_event','f1_event']] = full_metrics[['precision_event','f1_event']].fillna(0.0)
+            full_metrics.to_csv(out_file)
 
-    print(f"\n{'='*60}\nPIPELINE COMPLETE\n{'='*60}", flush=True)
+        # patient metrics
+        out_file = os.path.join(metric_folder, m, 'patient_metrics.csv')
+        if not force and os.path.exists(out_file):
+            continue
+        else:
+            pred_file_df = pd.DataFrame(pred_files, columns=['pred_file'])
+            pred_file_df['admission_id'] = pred_file_df['pred_file'].apply(lambda x: x.split('/')[-1].split('_')[0])
+            pred_file_df['event_id'] = pred_file_df['pred_file'].apply(lambda x: x.split('/')[-1][:-4])
+            pred_file_df['is_sz'] = pred_file_df['event_id'].apply(lambda x: 'seizure' in x)
+
+            # Calculate metrics for all files
+            all_p_metrics = patient_metrics(pred_file_df, feat_setting_ndd['stride'])
+            if not all_p_metrics.empty:
+                all_p_metrics.to_csv(out_file)
+
+    # =================================================================
+    # STEP 4: Generate Stats and Plots (from plot_metrics.py)
+    # =================================================================
+    print("\n--- STEP 4: Generating Stats and Plots ---")
+    figure_folder = os.path.join(base_output_folder, 'figures', setting_folder_name)
+    stats_folder = os.path.join(base_output_folder, 'stats', setting_folder_name)
+    os.makedirs(figure_folder, exist_ok=True)
+    os.makedirs(stats_folder, exist_ok=True)
+
+    # file_names = {'': 'patient_metrics.csv'}
+    
+    if not os.path.exists(patient_map_file):
+        print(f"Error: Patient info file not found at {patient_map_file}. Cannot generate stats by type.")
+    else:
+        patient_map = pd.read_csv(patient_map_file, dtype={'patient_id': str, 'admission_id':str})
+        file_name = 'patient_metrics.csv'
+        # --- Generate Stats Tables ---
+        print("    Generating stats tables...")
+        try:
+            all_metrics = []
+            for m in montage_keys:
+                metric_file = os.path.join(metric_folder, m, file_name)
+                metrics = pd.read_csv(metric_file, index_col=0)
+                metrics['montage'] = m
+                all_metrics.append(metrics)
+            all_metrics = pd.concat(all_metrics,axis=0).reset_index().rename(columns={'index':'admission_id'})
+            all_metrics['admission_id'] = all_metrics['admission_id'].astype(str)
+
+            # Overall comparison
+            table1 = TableOne(all_metrics, columns=plot_vars,
+                                groupby='montage', missing=False, overall=False, pval=False, decimals=3, labels=plot_labels)
+            table1_df = table1.tableone.get('Grouped by montage')
+            if table1_df is not None:
+                flatten_tableone(table1_df).T.to_csv(os.path.join(stats_folder, f'comparison.csv'))
+
+            # By epilepsy type
+            metrics_with_info = all_metrics.merge(patient_map, on='admission_id', how='left')
+            metrics_with_info = metrics_with_info[~metrics_with_info['epilepsy_type'].isna()]
+            metrics_with_info['tmp_group'] = metrics_with_info['epilepsy_type'] + '_' + metrics_with_info['montage']
+            table_type = TableOne(metrics_with_info, columns=plot_vars,
+                                    groupby='tmp_group', missing=False, overall=False, pval=False, decimals=3, labels=plot_labels)
+            table_type_df = table_type.tableone.get('Grouped by tmp_group')
+            if table_type_df is not None:
+                flatten_tableone(table_type_df).T.to_csv(os.path.join(stats_folder, f'comparison_by_type.csv'))
+
+            # By laterality
+            metrics_with_info = all_metrics.merge(patient_map, on='admission_id', how='left')
+            metrics_with_info = metrics_with_info[~metrics_with_info['laterality'].isna()]
+            metrics_with_info['tmp_group'] = metrics_with_info['laterality'] + '_' + metrics_with_info['montage']
+            table_lat = TableOne(metrics_with_info, columns=plot_vars,
+                                    groupby='tmp_group', missing=False, overall=False, pval=False, decimals=3, labels=plot_labels)
+            table_lat_df = table_lat.tableone.get('Grouped by tmp_group')
+            if table_lat_df is not None:
+                flatten_tableone(table_lat_df).T.to_csv(os.path.join(stats_folder, f'comparison_by_laterality.csv'))
+
+            # By location
+            metrics_with_info = all_metrics.merge(patient_map, on='admission_id', how='left')
+            metrics_with_info = metrics_with_info[~metrics_with_info['location'].isna()]
+            metrics_with_info['tmp_group'] = metrics_with_info['location'] + '_' + metrics_with_info['montage']
+            table_loc = TableOne(metrics_with_info, columns=plot_vars,
+                                    groupby='tmp_group', missing=False, overall=False, pval=False, decimals=3, labels=plot_labels)
+            table_loc_df = table_loc.tableone.get('Grouped by tmp_group')
+            if table_loc_df is not None:
+                flatten_tableone(table_loc_df).T.to_csv(os.path.join(stats_folder, f'comparison_by_location.csv'))
+
+        except Exception as e:
+            print(f"    Error generating TableOne stats: {e}")
+
+    print("\n--- Pipeline Complete ---")

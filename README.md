@@ -170,7 +170,7 @@ python run_svm.py \
 
 ## Input Data Format
 
-Input data should be in EDF format, with seizure annotations embedded. 
+Input data should be in EDF format, with seizure annotations embedded. Seizure files should be named with keyword `seizure`, interictal files should be named with keyword `iic`. 
 
 ---
 

@@ -525,9 +525,7 @@ if __name__ == '__main__':
     # STEP 4: Generate Stats and Plots (from plot_metrics.py)
     # =================================================================
     print("\n--- STEP 4: Generating Stats and Plots ---")
-    figure_folder = os.path.join(base_output_folder, 'figures', setting_folder_name)
     stats_folder = os.path.join(base_output_folder, 'stats', setting_folder_name)
-    os.makedirs(figure_folder, exist_ok=True)
     os.makedirs(stats_folder, exist_ok=True)
 
     # file_names = {'': 'patient_metrics.csv'}
