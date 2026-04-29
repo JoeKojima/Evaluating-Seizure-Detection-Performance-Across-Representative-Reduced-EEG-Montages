@@ -4,6 +4,7 @@ venv/
 ENV/
 env/
 .python-version
+.matplotlib_cache/
 
 # Python
 __pycache__/
@@ -66,6 +67,7 @@ tensorboard_logs/
 SPARCNET/
 sparcnet_pretrain.pt
 DenseNetClassifier.py
+sparcnet_results/
 
 # DynaSD
 DynaSD-wo_dev/

@@ -41,7 +41,6 @@ threadpoolctl==3.6.0
 timescoring @ git+https://github.com/esl-epfl/timescoring.git@f984436b010fa501eeda2de2547fe2b87df93bff
 torch
 tqdm==4.67.1
-triton==3.1.0
 typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0

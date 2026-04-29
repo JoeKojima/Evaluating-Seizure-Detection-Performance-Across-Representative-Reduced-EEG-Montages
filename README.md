@@ -102,11 +102,11 @@ git clone --branch wo_dev https://github.com/wojemann/DynaSD.git DynaSD-wo_dev
 The following files must be present in `pipeline_functions/`. 
 
 
-| File                | Used By                         | What It Provides                                                                                                                                                                             |
-| ------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `utils.py`          | `run_sparcnet.py`, `run_svm.py` | `Preprocessor` class (bandpass filter, bipolar re-referencing); `get_event_smoothed_pred`, `smooth_pred` (prediction post-processing)                                                        |
-| `feat_funcs.py`     | `run_sparcnet.py`               | `bandpass_filter`, `downsample` (signal preprocessing for SPaRCNet input windows)                                                                                                            |
-| `utils_baseline.py` | `run_svm.py`                    | `extract_features`, `train_one_class_svm`, `compute_novelty_scores`, `estimate_outlier_fraction`, `detect_seizure`, `apply_persistence` (SVM feature extraction and novelty detection logic) |
+| File              | Used By                                   | What It Provides                                                                                                                                                                                                                                                                                                                                     |
+| ----------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `utils.py`        | `run_sparcnet.py`, `run_svm.py`           | `Preprocessor` class (bandpass filter, bipolar re-referencing);                                                                                                                                                                                                                                                                                      |
+| `feat_funcs.py`   | `run_sparcnet.py`                         | `bandpass_filter`, `downsample` (signal preprocessing for SPaRCNet input windows)`get_event_smoothed_pred`, `smooth_pred` (prediction post-processing)`extract_features`, `train_one_class_svm`, `compute_novelty_scores`, `estimate_outlier_fraction`, `detect_seizure`, `apply_persistence` (SVM feature extraction and novelty detection logic) |
+| `calc_metrics.py` | `run_svm.py, run_ndd.py, run_sparcnet.py` | `compute_metrics`, `patient_metrics` for calculating metrics                                                                                                                                                                                                                                                                                         |
 
 
 > **Note for reproducibility:** The `Preprocessor` class handles bandpass filtering (1–40 Hz), 60 Hz notch filtering, and bipolar re-referencing to the standard 10-20 montage. It is the central preprocessing object shared across all three pipelines and should be applied before any montage subselection step.
@@ -124,8 +124,7 @@ python run_sparcnet.py \
     --patient_info /path/to/dataset_admission_info.csv \
     --montage all \
     --setting optimal \
-    --n_jobs 10 \
-    --do_plot
+    --n_jobs 10
 ```
 
 ### NDD pipeline

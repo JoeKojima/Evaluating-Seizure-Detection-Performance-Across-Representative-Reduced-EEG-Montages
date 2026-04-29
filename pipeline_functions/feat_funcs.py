@@ -7,6 +7,8 @@ from scipy.signal import welch
 from scipy.integrate import simpson
 from scipy.signal import hilbert
 from scipy.ndimage import uniform_filter1d, binary_opening, binary_closing, generic_filter
+from sklearn.svm import OneClassSVM
+from numbers import Number
 
 # ————————general————————
 
@@ -75,563 +77,6 @@ def bandpower(
 
     return bp
 
-
-# ————————adratio————————
-
-def ad_ratio_single(data, fs):
-    data = data.values
-    delta_power = np.nanmean(bandpower(data, fs, [1,4]))
-    alpha_power = np.nanmean(bandpower(data, fs, [8,13]))
-    return alpha_power/delta_power
-
-
-# ————————spike———————————
-
-
-def eeg_filter(signal, fc, filttype, fs):
-    """
-    Filters an EEG signal using a Butterworth filter.
-
-    Parameters:
-    - signal (array-like): The EEG signal to be filtered. This should be a one-dimensional array of values.
-    - fc (float): The cutoff frequency for the filter in Hz. Must be less than half the sampling rate (fs/2).
-    - filttype (str): The type of the filter. Acceptable values are 'low', 'high', 'bandpass', and 'bandstop'.
-    - fs (float): The sampling rate of the EEG signal in Hz.
-
-    Returns:
-    - array-like: The filtered EEG signal.
-
-    Raises:
-    - AssertionError: If the cutoff frequency is greater than or equal to half the sampling rate.
-
-    Note:
-    - This function uses the Butterworth filter from the `scipy.signal` module.
-    """
-    assert fc < fs / 2, "Cutoff frequency must be < one half the sampling rate"
-    # Initialize constants for filter
-    order = 6
-    # Create and apply filter
-    B, A = sig.butter(order, fc, filttype, fs=fs)
-    return sig.filtfilt(B, A, signal)
-
-
-def find_peaks(signal):
-    """
-    Finds the peaks and troughs in a given signal.
-
-    This function identifies the peaks and troughs of a signal by computing its first derivative
-    and then determining where the derivative changes sign.
-
-    Parameters:
-    - signal (array-like): A one-dimensional array of numeric values representing the signal.
-
-    Returns:
-    - tuple: A tuple containing two arrays:
-        1. An array of indices indicating the locations of the troughs.
-        2. An array of indices indicating the locations of the peaks.
-
-    Notes:
-    - Peaks are regions where the signal increases and then decreases, while troughs are regions where the signal decreases and then increases.
-    - This function may not capture all peaks or troughs if the signal has very small fluctuations or noise.
-
-    Examples:
-    >>> signal = [1, 3, 7, 6, 4, 5, 8, 6]
-    >>> find_peaks(signal)
-    (array([2]), array([6]))
-    """
-    ds = np.diff(signal, axis=0)
-    ds = np.insert(ds, 0, ds[0])  # pad diff
-    mask = np.argwhere(np.abs(ds[1:]) <= 1e-3).squeeze()  # got rid of +1
-    ds[mask] = ds[mask - 1]
-    ds = np.sign(ds)
-    ds = np.diff(ds)
-    ds = np.insert(ds, 0, ds[0])
-    t = np.argwhere(ds > 0)
-    p = np.argwhere(ds < 0)
-    return p, t
-
-
-def multi_channel_requirement(gdf, nchs, fs):
-    # Need to change so that it returns total spike counter to help remove duplicates
-    min_chs = 2
-    if nchs < 16:
-        max_chs = np.inf
-    else:
-        max_chs = np.ceil(nchs / 2)
-    min_time = 100 * 1e-3 * fs
-
-    # Check if there is even more than 1 spiking channel. Will throw error
-    try:
-        if len(np.unique(gdf[:, 1])) < min_chs:
-            return np.array([])
-    except IndexError:
-        return np.array([])
-
-    final_spikes = []
-
-    s = 0  # start at time negative one for 0 based indexing
-    curr_seq = [s]
-    last_time = gdf[s, 0]
-    spike_count = 0
-    while s < (gdf.shape[0] - 1):  # check to see if we are at last spike
-        # move to next spike time
-        new_time = gdf[s + 1, 0]  # calculate the next spike time
-
-        # if it's within the time diff
-        if (
-            new_time - last_time
-        ) < min_time:  # check that the spikes are within the window of time
-            curr_seq.append(s + 1)  # append it to the current sequence
-
-            if s == (
-                gdf.shape[0] - 2
-            ):  # see if you just added the last spike, if so, done with sequence
-                # done with sequence, check if the number of involved chs is
-                # appropriate
-                l = len(np.unique(gdf[curr_seq, 1]))
-                if l >= min_chs and l <= max_chs:
-                    final_spikes.append(
-                        np.hstack(
-                            (
-                                gdf[curr_seq, :],
-                                np.ones((len(curr_seq), 1)) * spike_count,
-                            )
-                        )
-                    )
-        else:
-            # done with sequence, check if the length of sequence is
-            # appropriate
-            l = len(np.unique(gdf[curr_seq, 1]))
-            if (l >= min_chs) & (l <= max_chs):
-                final_spikes.append(
-                    np.hstack(
-                        (gdf[curr_seq, :], np.ones((len(curr_seq), 1)) * spike_count)
-                    )
-                )
-                spike_count += 1
-            # reset sequence
-            curr_seq = [s + 1]
-        # increase the last time
-        last_time = gdf[s + 1, 0]
-
-        # increase the current spike
-        s += 1
-
-    if len(final_spikes) != 0:
-        return np.vstack(
-            final_spikes
-        )  # return all final spikes with a spike sequence counter
-    else:
-        return np.array([])
-
-
-def multi_channel_requirement_with_label(gdf, nchs, fs):
-    # Need to change so that it returns total spike counter to help remove duplicates
-    min_chs = 2
-    if nchs < 16:
-        max_chs = np.inf
-    else:
-        max_chs = np.ceil(nchs / 2)
-    min_time = 100 * 1e-3 * fs
-
-    # Check if there is even more than 1 spiking channel. Will throw error
-    try:
-        if len(np.unique(gdf[:, 1])) < min_chs:  # check unique channels
-            return np.array([])
-    except IndexError:
-        return np.array([])
-
-    final_spikes = []
-
-    s = 0  # start at time negative one for 0 based indexing
-    curr_seq = [s]
-    last_time = gdf[s, 0]
-    spike_count = 0
-    while s < (gdf.shape[0] - 1):  # check to see if we are at last spike
-        # move to next spike time
-        new_time = gdf[s + 1, 0]  # calculate the next spike time
-
-        # if it's within the time diff
-        if (
-            new_time - last_time
-        ) < min_time:  # check that the spikes are within the window of time
-            curr_seq.append(s + 1)  # append it to the current sequence
-
-            if s == (
-                gdf.shape[0] - 2
-            ):  # see if you just added the last spike, if so, done with sequence
-                # done with sequence, check if the number of involved chs is
-                # appropriate
-                l = len(np.unique(gdf[curr_seq, 1]))
-                if l >= min_chs and l <= max_chs:
-                    final_spikes.append(
-                        np.hstack(
-                            (
-                                gdf[curr_seq, :2],
-                                np.ones((len(curr_seq), 1)) * spike_count,
-                                gdf[curr_seq, 2:],
-                            )
-                        )
-                    )
-        else:
-            # done with sequence, check if the length of sequence is
-            # appropriate
-            l = len(np.unique(gdf[curr_seq, 1]))
-            if (l >= min_chs) & (l <= max_chs):
-                final_spikes.append(
-                    np.hstack(
-                        (
-                            gdf[curr_seq, :2],
-                            np.ones((len(curr_seq), 1)) * spike_count,
-                            gdf[curr_seq, 2:],
-                        )
-                    )
-                )
-                spike_count += 1
-            # reset sequence
-            curr_seq = [s + 1]
-        # increase the last time
-        last_time = gdf[s + 1, 0]
-
-        # increase the current spike
-        s += 1
-
-    if len(final_spikes) != 0:
-        return np.vstack(
-            final_spikes
-        )  # return all final spikes with a spike sequence counter
-    else:
-        return np.array([])
-
-
-def process_channel(
-    signal, fs, tmul, absthresh, sur_time, too_high_abs, spkdur, lpf1, hpf
-):
-    out = []  # initialize preliminary spike receiver
-
-    if np.any(np.isnan(signal)):
-        return None  # if there are any nans in the signal skip the channel (worth investigating)
-
-    # Re-adjust the mean of the signal to be zero
-    signal = signal - np.mean(signal)
-
-    # receiver initialization
-    spike_times = []
-    spike_durs = []
-    spike_amps = []
-
-    # low pass filter to remove artifact
-    lpsignal = eeg_filter(signal, lpf1, "lowpass", fs)
-
-    # high pass filter for the 'spike' component
-    hpsignal = eeg_filter(lpsignal, hpf, "highpass", fs)
-
-    # defining thresholds
-    lthresh = np.median(np.abs(hpsignal))
-    thresh = lthresh * tmul  # this is the final threshold we want to impose
-
-    signals = [hpsignal, -hpsignal]
-
-    for ksignal in signals:
-        # apply custom peak finder
-        spp, spv = find_peaks(ksignal)  # calculate peaks and troughs
-        spp, spv = spp.squeeze(), spv.squeeze()  # reformat
-
-        # find the durations less than or equal to that of a spike
-        idx = np.argwhere(np.diff(spp) <= spkdur[1]).squeeze()
-        startdx = spp[idx]  # indices for each spike that has a long enough duration
-        startdx1 = spp[idx + 1]  # indices for each "next" spike
-
-        # Loop over peaks
-        for i in range(len(startdx)):
-            spkmintic = spv[(spv > startdx[i]) & (spv < startdx1[i])]
-            # find the valley that is between the two peaks
-            if not any(spkmintic):
-                continue
-            max_height = max(
-                np.abs(ksignal[startdx1[i]] - ksignal[spkmintic]),
-                np.abs(ksignal[startdx[i]] - ksignal[spkmintic]),
-            )[0]
-            if max_height > thresh:  # see if the peaks are big enough
-                spike_times.append(int(spkmintic))  # add index to the spike list
-                spike_durs.append(
-                    (startdx1[i] - startdx[i]) * 1000 / fs
-                )  # add spike duration to list
-                spike_amps.append(max_height)  # add spike amplitude to list
-
-    # Generate spikes matrix
-    spikes = np.vstack([spike_times, spike_durs, spike_amps]).T
-
-    # initialize exclusion receivers
-    toosmall = []
-    toosharp = []
-    toobig = []
-
-    # now have all the info we need to decide if this thing is a spike or not.
-    for i in range(spikes.shape[0]):  # for each spike
-        # re-define baseline to be 2 seconds surrounding
-        surround = sur_time
-        istart = int(
-            max(0, np.around(spikes[i, 0] - surround * fs))
-        )  # find -2s index, ensuring not to exceed idx bounds
-        iend = int(
-            min(len(hpsignal), np.around(spikes[i, 0] + surround * fs + 1))
-        )  # find +2s index, ensuring not to exceed idx bounds
-
-        alt_thresh = (
-            np.median(np.abs(hpsignal[istart:iend])) * tmul
-        )  # identify threshold within this window
-
-        if (spikes[i, 2] > alt_thresh) & (
-            spikes[i, 2] > absthresh
-        ):  # both parts together are bigger than thresh: so have some flexibility in relative sizes
-            if (
-                spikes[i, 1] > spkdur[0]
-            ):  # spike wave cannot be too sharp: then it is either too small or noise
-                if spikes[i, 2] < too_high_abs:
-                    out.append(spikes[i, 0])  # add timestamp of spike to output list
-                else:
-                    toobig.append(spikes[i, 0])  # spike is above too_high_abs
-            else:
-                toosharp.append(spikes[i, 0])  # spike duration is too short
-        else:
-            toosmall.append(spikes[i, 0])  # window-relative spike height is too short
-
-    # Spike Realignment
-    if out:
-        timeToPeak = np.array([-0.15, 0.15])
-        fullSurround = np.array([-sur_time, sur_time]) * fs
-        idxToPeak = timeToPeak * fs
-
-        hpsignal_length = len(hpsignal)
-
-        for i in range(len(out)):
-            currIdx = out[i]
-            surround_idx = np.arange(
-                max(0, round(currIdx + fullSurround[0])),
-                min(round(currIdx + fullSurround[1]), hpsignal_length),
-            )
-            idxToLook = np.arange(
-                max(0, round(currIdx + idxToPeak[0])),
-                min(round(currIdx + idxToPeak[1]), hpsignal_length),
-            )
-            snapshot = hpsignal[idxToLook] - np.median(hpsignal[surround_idx])
-            I = np.argmax(np.abs(snapshot))
-            out[i] = idxToLook[0] + I
-
-    return np.array(out)
-
-
-def spike_detector(data, fs, **kwargs):
-    """
-    Parameters
-    data:           np.NDArray - iEEG recordings (m samples x n channels)
-    fs:             int - sampling frequency
-
-    kwargs
-    tmul:           float - 19 - threshold multiplier
-    absthresh:      float - 100 - absolute threshold for spikes
-    sur_time:       float - 0.5 - time surrounding a spike to analyze in seconds
-    close_to_edge:  float - 0.05 - beginning and ending buffer in seconds
-    too_high_abs:   float - threshold for artifact rejection
-    spkdur:         Iterable - min and max spike duration thresholds in ms (min, max)
-    lpf1:           float - low pass filter cutoff frequency
-    hpf:            float - high pass filter cutoff frequency
-
-    Returns
-    gdf:            np.NDArray - spike locations (m spikes x (peak index, channel))
-    """
-
-    ### Assigning KWARGS using a more efficient method ###############
-    tmul = kwargs.get("tmul", 19)  # 25
-    absthresh = kwargs.get("absthresh", 100)
-    sur_time = kwargs.get("sur_time", 0.5)
-    close_to_edge = kwargs.get("close_to_edge", 0.05)
-    too_high_abs = kwargs.get("too_high_abs", 1e3)
-    # spike duration must be less than this in ms. It gets converted to samples here
-    spkdur = kwargs.get("spkdur", np.array([15, 260]))
-    lpf1 = kwargs.get("lpf1", 30)  # low pass filter for spikey component
-    hpf = kwargs.get("hpf", 7)  # high pass filter for spikey component
-    ###################################
-
-    # Assertions and assignments
-    if not isinstance(data, np.ndarray):
-        data = data.to_numpy()
-    if not isinstance(spkdur, np.ndarray):
-        spkdur = np.array(spkdur)
-
-    # Receiver and constant variable initialization
-    # all_spikes = np.ndarray((1,2),dtype=float)
-    all_spikes = []
-    nchs = data.shape[1]
-    spkdur = (spkdur / 1000) * fs  # From milliseconds to samples
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures_to_channel = {
-            executor.submit(
-                process_channel,
-                data[:, j],  # collect channel
-                fs,
-                tmul,
-                absthresh,
-                sur_time,
-                too_high_abs,
-                spkdur,
-                lpf1,
-                hpf,
-            ): j
-            for j in range(nchs)
-        }
-
-        for future in concurrent.futures.as_completed(futures_to_channel):
-            j = futures_to_channel[future]
-            try:
-                channel_out = future.result()
-                # Concatenate the list of spikes to the global spike receiver
-                if channel_out is not None and channel_out.any():
-                    temp = (
-                        np.array(
-                            [
-                                np.expand_dims(channel_out, 1),
-                                np.tile([j], (len(channel_out), 1)),
-                            ],
-                            dtype=float,
-                        )
-                        .squeeze()
-                        .T
-                    )
-                    # all_spikes = np.vstack((all_spikes,temp))
-                    all_spikes.append(temp)
-                    # change all spikes to a list, append and then vstack all at end
-            except Exception as exc:
-                print(f"Channel {j} generated an exception: {exc}")
-
-    # Final Post-Processing - sort spikes by time not np.isnan(all_spikes).all():
-    if len(all_spikes) == 0:
-        return np.array([])
-    else:
-        all_spikes = np.vstack(all_spikes)
-        all_spikes = np.vstack(list({tuple(row) for row in list(all_spikes)}))
-        idx = np.argsort(all_spikes[:, 0], axis=0)
-        gdf = all_spikes[idx, :]
-
-        # if there are no spikes, just give up
-        # print('No spikes detected')
-
-    # if all_spikes.any():
-    #     # remove exact copies of spikes
-    #     all_spikes = np.vstack(list({tuple(row) for row in list(all_spikes)}))
-
-    #     # sort spikes
-    #     idx = np.argsort(all_spikes[:,0],axis=0)
-    #     gdf = all_spikes[idx,:]
-
-    ## Remove those too close to beginning and end
-    if gdf.shape[0]:
-        close_idx = close_to_edge * fs
-        gdf = gdf[gdf[:, 0] > close_idx, :]
-        gdf = gdf[gdf[:, 0] < data.shape[0] - close_idx, :]
-
-    # removing duplicate spikes with closeness threshold
-    if gdf.any():
-        # distance between spike times
-        gdf_diff = np.diff(gdf, axis=0)
-        # time difference is below threshold - thresh not necessary becasue of spike realignment
-        mask1 = np.abs(gdf_diff[:, 0]) < 100e-3 * fs
-        # ensuring they're on different channels
-        mask2 = gdf_diff[:, 1] == 0
-        too_close = np.argwhere(mask1 & mask2) + 1
-
-        # coerce shape of mask to <=2 dimensions
-        too_close = too_close.squeeze()
-        close_mask = np.ones((gdf.shape[0],), dtype=bool)
-        close_mask[too_close] = False
-        gdf = gdf[close_mask, :]
-
-    # Check that spike occurs in multiple channels
-    if gdf.any() & (nchs > 1):
-        gdf = multi_channel_requirement(gdf, nchs, fs)
-
-    return gdf
-
-
-def spike_ieeg_single(data, fs, bad_mask):
-    """The function takes a data clip of 60 seconds, do signal preprocessing, and return spike rate and location
-    Data in the format of pandas dataframe, with columns being channels.
-
-    Args:
-        data (_type_): data should be convert to volts before usage
-        fs (int): sampling frequency of data
-    """
-    # Check if data dataframe is all NaNs
-    if data.isnull().values.all():
-        print(f"Empty dataframe after download, skip...")
-        return np.array([]),np.nan
-
-    chs = data.columns[bad_mask]
-    ieeg_data = data.to_numpy()
-    ieeg_data = ieeg_data[:,bad_mask]
-
-    ##############################
-    # Detect spikes
-    ##############################
-
-    spike_output = spike_detector(
-        data=ieeg_data,
-        fs=fs,
-        electrode_labels=chs,
-    )
-    spike_output = spike_output.astype(int)
-    actual_number_of_spikes = len(spike_output)
-
-    return spike_output, actual_number_of_spikes
-
-
-
-    # ————————————————synchrony————————————————
-
-def calculate_synchrony(time_series):
-    """
-    Calculate the Kuramoto order parameter for a set of time series
-    Args:
-        time_series (np.array): 2D array where each row is a time series
-    Returns:
-        np.array: Kuramoto order parameter for each time point
-    """
-    # Extract the number of time series and the number of time points
-    N, _ = time_series.shape
-    # Apply the Hilbert Transform to get an analytical signal
-    analytical_signals = hilbert(time_series)
-    assert analytical_signals.shape == time_series.shape
-    # Extract the instantaneous phase for each time series using np.angle
-    phases = np.angle(analytical_signals, deg=False)
-    assert phases.shape == time_series.shape
-    # Compute the Kuramoto order parameter for each time point
-    # 1j*1j == -1
-    r_t = np.abs(np.nansum(np.exp(1j * phases), axis=0)) / N
-    R = np.nanmean(r_t)
-    return r_t, R
-
-def synchrony_single(data, bad_mask):
-    """The function takes a data clip of 2 minutes, do signal preprocessing, and return synchrony
-
-    Args:
-        data (_type_): data should be convert to volts before usage
-        fs (int): sampling frequency of data
-    """
-    # Check if data dataframe is all NaNs
-    if data.isnull().values.all():
-        print(f"Empty dataframe after download, skip...")
-        return np.nan
-
-    # chs = data.columns[bad_mask]
-    ieeg_data = data.to_numpy()
-    ieeg_data = ieeg_data[:,bad_mask]
-    _, R = calculate_synchrony(ieeg_data.T)
-
-    return R.item()
-
-
 # ————————————sparcnet————————————
 
 def extract_seiz_ranges(true_data):
@@ -657,22 +102,26 @@ def smooth_pred(pred):
     pred = np.array(pred)
     if len(pred) == 1:
         return pred.astype(int)
-    smoothed = binary_opening(pred, structure=np.ones(2))  # remove short 1s
-    smoothed = binary_closing(smoothed, structure=np.ones(2))  # remove short 0s
-    smoothed[0] = smoothed[1]
-    smoothed[-1] = smoothed[-2]
+    smoothed = pred.copy()
+    for win in range(2,4):
+        smoothed = binary_opening(smoothed, structure=np.ones(win))  # remove short 1s
+        smoothed = binary_closing(smoothed, structure=np.ones(win))  # remove short 0s
+        smoothed[0] = smoothed[1]
+        smoothed[-1] = smoothed[-2]
 
-    smoothed = binary_opening(pred, structure=np.ones(3))  # remove short 1s
-    smoothed = binary_closing(smoothed, structure=np.ones(3))  # remove short 0s
-    smoothed[0] = smoothed[1]
-    smoothed[-1] = smoothed[-2]
     return smoothed.astype(int)
 
-def get_events(smoothed_pred, gap_num = 2, min_event_num = 10):
+
+def get_events(pred, gap_num = 2, min_event_num = 10, return_pred = False):
+    smoothed_pred = smooth_pred(pred)
+    new_pred = np.zeros_like(smoothed_pred)
     sz_events = np.array(extract_seiz_ranges(smoothed_pred))
 
     if sz_events.shape[0] == 0:
-        return sz_events
+        if return_pred:
+            return np.array([]), new_pred
+        else:
+            return np.array([])
 
     # Merge events that are close together
     start_times = sz_events[:, 0]
@@ -695,7 +144,37 @@ def get_events(smoothed_pred, gap_num = 2, min_event_num = 10):
     # Filter short events
     durations = sz_events[:, 1] - sz_events[:, 0]
     sz_events = sz_events[durations >= min_event_num]
-    return sz_events
+
+    if sz_events.shape[0] == 0:
+        if return_pred:
+            return np.array([]), new_pred
+        else:
+            return np.array([])
+    
+    # Merge events that are close together
+    start_times = sz_events[:, 0]
+    end_times = sz_events[:, 1]
+
+    merged_start = [start_times[0]]
+    merged_end = [end_times[0]]
+
+    for i in range(1, len(start_times)):
+        if start_times[i] - merged_end[-1] <= 4:
+            # Merge the events
+            merged_end[-1] = end_times[i]
+        else:
+            # Start a new event
+            merged_start.append(start_times[i])
+            merged_end.append(end_times[i])
+
+    sz_events = np.array(list(zip(merged_start, merged_end)))
+
+    for start, end in sz_events:
+        new_pred[start:end] = 1
+    if return_pred:
+        return sz_events, new_pred
+    else:
+        return sz_events
 
 
 def get_event_smoothed_pred(smoothed_pred, gap_num = 2, min_event_num = 10):
@@ -730,215 +209,163 @@ def get_event_smoothed_pred(smoothed_pred, gap_num = 2, min_event_num = 10):
         new_pred[start:end] = 1
     return new_pred
 
-def extend_search(arr, start_idx, direction="forward"):
-    n = len(arr)
-    if direction == "forward":
-        for i in range(start_idx + 1, n):
-            if arr[i] == 0:
-                return i-1
-        return n
-    elif direction == "backward":
-        for i in range(start_idx - 1, -1, -1):
-            if arr[i] == 0:
-                return i+1
-        return 0
+# ————————————svm————————————
 
-def get_events_and_extend(smoothed_pred, prob, gap_num = 2, min_event_num = 10, extend_thres = 0.5):
-    new_pred = np.zeros_like(smoothed_pred)
-    sz_events = np.array(extract_seiz_ranges(smoothed_pred))
-    extend_pred = (prob >= extend_thres).astype(int)
+#### feature extraction
+def teager_operator(x):
+    """
+    Computes the Teager Energy Operator for a 1D signal.
+    The output will be 2 samples shorter than the input.
+    """
+    return x[1:-1]**2 - x[:-2] * x[2:]
+def mean_curve_length(x):
+    return np.log1p(np.mean(np.abs(np.diff(x))))
 
-    if sz_events.shape[0] == 0:
-        return new_pred
+def mean_energy(x):
+    return np.log1p(np.mean(x**2))
+
+def mean_teager_energy(x):
+    te = teager_operator(x)
+    return np.log1p(np.mean(te))
+
+def extract_features(eeg, fs=200, win_len=1.0, step_size=0.5):
+    """
+    epoch: 1D np.array EEG signal
+    fs: sampling frequency (e.g. 200 Hz)
+    win_len: window length in seconds
+    step_size: window overlap step in seconds
+    """
+    N = int(win_len * fs)
+    step = int(step_size * fs)
+    features = []
+
+    for start in range(0, len(eeg) - N + 1, step):
+        x = eeg[start:start + N]
+        cl = mean_curve_length(x)
+        e = mean_energy(x)
+        te = mean_teager_energy(x)
+        features.append([cl, e, te])
+    return np.array(features)
+#### classifier 
+def train_one_class_svm(X_train, nu=0.1, gamma=1.0):
+    model = OneClassSVM(kernel='rbf', nu=nu, gamma=gamma)
+    model.fit(X_train)
+    return model
+
+def compute_novelty_scores(model, X_test):
+    preds = model.predict(X_test)  # +1 or -1
+    return preds
+
+def estimate_outlier_fraction(y_pred, n=10):
+    y = (y_pred == -1).astype(float)
+    cumsum = np.cumsum(y)
+    out = cumsum.copy()
+    out[n:] = cumsum[n:] - cumsum[:-n]
+    # variable window size at start
+    counts = np.minimum(np.arange(1, len(y)+1), n)
     
-    extended_start = []
-    extended_end = []
-    for sz in sz_events:
-        extended_start.append(extend_search(extend_pred, sz[0], direction="backward"))
-        extended_end.append(extend_search(extend_pred, sz[1], direction="forward"))
+    return out / counts
 
-    merged_start = [extended_start[0]]
-    merged_end = [extended_end[0]]
+# === Seizure Detection Based on ν̂ Hypothesis Test ===
+def detect_seizure(nu_hat, threshold=0.8):
+    return (nu_hat >= threshold).astype(int)
 
-    for i in range(1, len(extended_start)):
-        if extended_start[i] - merged_end[-1] <= gap_num:
-            # Merge the events
-            merged_end[-1] = extended_end[i]
+# === Apply Persistence Filter ===
+def extract_seiz_ranges(true_data):
+    # the extracted start and stop can should be used like start:stop to extract data
+    diff_data = np.diff(np.concatenate([[0],np.ravel(true_data),[0]]))
+    starts = np.where(diff_data == 1)[0].tolist()
+    stops = np.where(diff_data == -1)[0].tolist()
+    return list(zip(starts,stops))
+
+def apply_persistence(z, refractory_sec=180, step_sec=0.5):
+    refractory_steps = int(refractory_sec / step_sec)
+    pred_events = extract_seiz_ranges(z)
+    detection = np.zeros_like(z)
+    if len(pred_events) == 0:
+        return detection
+    starts = [pred_events[0][0]]
+    ends = [pred_events[0][1]]
+    if len(pred_events) > 1:
+        for i in range(1,len(pred_events)):
+            if pred_events[i][0]-ends[-1] < refractory_steps:
+                pass
+            else:
+                starts.append(pred_events[i][0])
+                ends.append(pred_events[i][1])
+    for start, end in zip(starts, ends):
+        detection[start:end] = 1
+    return detection
+
+
+# seizure onset detection
+def get_onset_and_spread(sz_prob,threshold=None,
+                        ret_smooth_mat = True, #True
+                        filter_w = 5, # seconds 
+                        rwin_size = 5, # seconds #10
+                        rwin_req = 4, # seconds #9
+                        w_size = 1,
+                        w_stride = 0.5
+                        ): 
+
+        sz_clf = (sz_prob>threshold).reset_index(drop=True)
+        filter_w_idx = np.floor((filter_w - w_size)/w_stride).astype(int) + 1
+        sz_clf = pd.DataFrame(sig.ndimage.median_filter(sz_clf,size=filter_w_idx,mode='nearest',origin=0),columns=sz_prob.columns)
+        seized_idxs = np.any(sz_clf,axis=1)
+        rwin_size_idx = np.floor((rwin_size - w_size)/w_stride).astype(int) + 1
+        rwin_req_idx = np.floor((rwin_req - w_size)/w_stride).astype(int) + 1
+        sz_spread_idxs_all = sz_clf.rolling(window=rwin_size_idx,center=False).apply(lambda x: (x == 1).sum()>rwin_req_idx).dropna().reset_index(drop=True)
+        sz_spread_idxs = sz_spread_idxs_all.loc[seized_idxs]
+        extended_seized_idxs = np.any(sz_spread_idxs,axis=1)
+        if sum(extended_seized_idxs) > 0:
+            # Get indices into the sz_prob matrix and times since start of matrix that the seizure started
+            first_sz_idxs = sz_spread_idxs.loc[extended_seized_idxs].idxmax(axis=0)
+            sz_idxs_arr = np.array(first_sz_idxs)
+            sz_order = np.argsort(first_sz_idxs)
+            sz_idxs_arr = first_sz_idxs.iloc[sz_order].to_numpy()
+            sz_ch_arr = first_sz_idxs.index[sz_order].to_numpy()
+            # sz_times_arr = self.get_win_times(len(sz_clf))[sz_idxs_arr]
+            # sz_times_arr -= np.min(sz_times_arr)
+            # sz_ch_arr = np.array([s.split("-")[0] for s in sz_ch_arr]).flatten()
         else:
-            # Start a new event
-            merged_start.append(extended_start[i])
-            merged_end.append(extended_end[i])
+            sz_ch_arr = []
+            sz_idxs_arr = np.array([])
+        sz_idxs_df = pd.DataFrame(sz_idxs_arr.reshape(1,-1),columns=sz_ch_arr)
+        sz_idxs_df.drop(columns=sz_idxs_df.columns[(sz_idxs_df == 0).all()]) # zhiyu: drop those start at 0
+        if ret_smooth_mat:
+            return sz_idxs_df,sz_spread_idxs_all
+        else:
+            '''sz_idx_df is the onset time of each channel'''
+            return sz_idxs_df
 
-    sz_events = np.array(list(zip(merged_start, merged_end)))
+def notch_filter(data, hz, fs):
+    b,a = sig.iirnotch(hz, 30, fs)
+    return sig.filtfilt(b,a,data)
 
-    # Filter short events
-    durations = sz_events[:, 1] - sz_events[:, 0]
-    sz_events = sz_events[durations >= min_event_num]
-    return sz_events
+def band_pass_filter(data,high,low,fs):
+    b, a = sig.butter(4, [low / (0.5 * fs), high / (0.5 * fs)], btype='band')
+    return sig.filtfilt(b, a, data)
 
-# def get_events_and_extend(smoothed_pred, prob, gap_num = 2, min_event_num = 10, extend_thres = 0.5):
-#     new_pred = np.zeros_like(smoothed_pred)
-#     sz_events = np.array(extract_seiz_ranges(smoothed_pred))
-#     extend_pred = (prob >= extend_thres).astype(int)
+def preprocess(df,fs, current_channel_order, new_channel_order,bipolar_channels):
+    segment_data = df.values.T
 
-#     if sz_events.shape[0] == 0:
-#         return new_pred
+    fs = int(fs)
+    notch_data = notch_filter(segment_data, hz=60, fs=fs)
+    filtered_data = band_pass_filter(notch_data,high=15,low=3, fs=fs).T
+
+    signal_len = int(filtered_data.shape[0]/fs*200)
+    downsampled_data = sig.resample(filtered_data,signal_len,axis=0)
     
-#     extended_start = []
-#     extended_end = []
-#     for sz in sz_events:
-#         extended_start.append(extend_search(extend_pred, sz[0], direction="backward"))
-#         extended_end.append(extend_search(extend_pred, sz[1], direction="forward"))
+    # Process and reshape data
+    indices = [2, 12, 13, 10, 11]
+    pz_mean = np.mean(downsampled_data[:, indices], axis=1)
 
-#     merged_start = [extended_start[0]]
-#     merged_end = [extended_end[0]]
+    downsampled_data_with_pz = np.column_stack((downsampled_data, pz_mean))
+    reorder_index = [current_channel_order.index(ch) for ch in new_channel_order]
+    reordered_data = downsampled_data_with_pz[:, reorder_index]
+    #car_data = reordered_data - np.mean(reordered_data, axis=1, keepdims=True)
+    bipolar_ids = np.array([[new_channel_order.index(bc.split('-')[0]), new_channel_order.index(bc.split('-')[1])] for bc in bipolar_channels])
+    bipolar_data = reordered_data[:, bipolar_ids[:, 0]] - reordered_data[:, bipolar_ids[:, 1]]
+    #combined_eeg = np.hstack((car_data, bipolar_data))
+    return bipolar_data
 
-#     for i in range(1, len(extended_start)):
-#         if extended_start[i] - merged_end[-1] <= gap_num:
-#             # Merge the events
-#             merged_end[-1] = extended_end[i]
-#         else:
-#             # Start a new event
-#             merged_start.append(extended_start[i])
-#             merged_end.append(extended_end[i])
-
-#     sz_events = np.array(list(zip(merged_start, merged_end)))
-
-#     # Filter short events
-#     durations = sz_events[:, 1] - sz_events[:, 0]
-#     sz_events = sz_events[durations >= min_event_num]
-#     return sz_events
-
-
-# def get_pred(pred, smoothing_num = 5, min_event_num = 10, gap_num = 2):
-#     # Smooth predictions using a uniform filter
-
-#     smoothed = nan_aware_uniform_filter1d(pred.astype(float), 2*smoothing_num + 1)
-#     pred_new = (smoothed >= 0.6).astype(int)
-#     if len(pred_new) <= 1:
-#         return pred_new  
-#     # # Extract seizure events
-#     sz_events = np.array(extract_seiz_ranges(pred_new))
-#     pred_updated = np.zeros_like(pred_new).astype(int)
-
-#     if sz_events.shape[0] == 0:
-#         return pred_updated
-
-#     # Merge events that are close together
-#     start_times = sz_events[:, 0]
-#     end_times = sz_events[:, 1]
-
-#     merged_start = [start_times[0]]
-#     merged_end = [end_times[0]]
-
-#     for i in range(1, len(start_times)):
-#         if start_times[i] - merged_end[-1] <= gap_num:
-#             # Merge the events
-#             merged_end[-1] = end_times[i]
-#         else:
-#             # Start a new event
-#             merged_start.append(start_times[i])
-#             merged_end.append(end_times[i])
-
-#     sz_events = np.array(list(zip(merged_start, merged_end)))
-
-#     # Filter short events
-#     durations = sz_events[:, 1] - sz_events[:, 0]
-#     sz_events = sz_events[durations >= min_event_num]
-
-#     # Update predictions
-#     for sz in sz_events:
-#         pred_updated[sz[0]:sz[1]] = 1
-
-#     return pred_updated
-
-# def smooth_pred(pred, smoothing_num = 5, min_event_num = 10, gap_num = 2):
-#     # Smooth predictions using a uniform filter
-
-#     smoothed = nan_aware_uniform_filter1d(pred.astype(float), 2*smoothing_num + 1)
-#     pred_new = (smoothed >= 0.6).astype(int)
-#     if len(pred_new) <= 1:
-#         return pred_new  
-#     # # Extract seizure events
-#     sz_events = np.array(extract_seiz_ranges(pred_new))
-#     pred_updated = np.zeros_like(pred_new).astype(int)
-
-#     if sz_events.shape[0] == 0:
-#         return pred_updated
-
-#     # Merge events that are close together
-#     start_times = sz_events[:, 0]
-#     end_times = sz_events[:, 1]
-
-#     merged_start = [start_times[0]]
-#     merged_end = [end_times[0]]
-
-#     for i in range(1, len(start_times)):
-#         if start_times[i] - merged_end[-1] <= gap_num:
-#             # Merge the events
-#             merged_end[-1] = end_times[i]
-#         else:
-#             # Start a new event
-#             merged_start.append(start_times[i])
-#             merged_end.append(end_times[i])
-
-#     sz_events = np.array(list(zip(merged_start, merged_end)))
-
-#     # Filter short events
-#     durations = sz_events[:, 1] - sz_events[:, 0]
-#     sz_events = sz_events[durations >= min_event_num]
-
-#     # Update predictions
-#     for sz in sz_events:
-#         pred_updated[sz[0]:sz[1]] = 1
-
-#     return pred_updated
-
-# ————————————yasa————————————————
-
-def mode_filter(x):
-    vals = x[~np.isnan(x)]
-    vals = vals[vals>=0]  # ignore background -1
-    if len(vals) == 0:
-        return np.nan
-    count = np.bincount(vals.astype(int))
-    max_vals = np.where(count == count.max())[0]
-    if len(max_vals) == 1:
-        return count.argmax()
-    else:
-        dist = [np.min(np.abs(np.where(x==v)[0]-len(x)//2)) for v in max_vals]
-        return max_vals[np.argmin(dist)]
-    
-# def smooth_pred_yasa(labels):
-#     cleaned = np.zeros_like(labels)
-#     for cls in np.unique(labels):
-#         if cls == 0:  # skip background
-#             continue
-#         mask = (labels == cls)
-#         mask_clean = binary_opening(mask, structure=np.ones(3))  # adjust structure
-#         mask_clean = binary_closing(mask_clean, structure=np.ones(3))  # adjust structure
-#         mask_clean[0] = mask_clean[1]
-#         mask_clean[-1] = mask_clean[-2]
-#         cleaned[mask_clean] = cls
-#     return cleaned
-
-# ————————————wvnt————————————————
-
-# def get_pred(sz_prob, threshold, filter_w=5, rwin_size=5, rwin_req=4, num_chan = 1):
-#     feat_settings = {'win':1, 'stride':0.5}
-#     filter_w_idx = int(np.floor((filter_w - feat_settings['win']) / feat_settings['stride'])) + 1
-#     rwin_size_idx = int(np.floor((rwin_size - feat_settings['win']) / feat_settings['stride'])) + 1
-#     rwin_req_idx = int(np.floor((rwin_req - feat_settings['win']) / feat_settings['stride'])) + 1
-
-#     sz_clf = sz_prob > threshold
-#     sz_clf = scipy.ndimage.median_filter(sz_clf, size=filter_w_idx, mode='nearest',axes=0,origin=0)
-    
-#     rolling_sums = np.round(np.abs(scipy.signal.fftconvolve(sz_clf, np.ones([rwin_size_idx,1]), mode='full',axes=0)))
-#     rolling_sums[:rwin_size_idx-1,:] = rolling_sums[rwin_size_idx-1,:]
-#     rolling_sums = rolling_sums[:sz_clf.shape[0],:]
-#     sz_spread_idxs_all = rolling_sums >= rwin_req_idx
-    
-#     pred = (np.sum(sz_spread_idxs_all, axis=1) >= num_chan).astype(int)
-
-#     return pred, sz_spread_idxs_all
-    

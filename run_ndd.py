@@ -112,71 +112,29 @@ def custom_bipolar(df, pairs):
             
     return data
 
-def epiminder_simulate(raw):
-    fs = raw.info['sfreq']
-    n_times = raw.n_times
-    new_ch_names = ['CP5', 'CP6', 'CP1', 'CP2']
-    new_ch_types = ['eeg'] * len(new_ch_names)
-    new_data = np.zeros((len(new_ch_names), n_times))
-    new_info = mne.create_info(new_ch_names, fs, new_ch_types)
-    new_raw = mne.io.RawArray(new_data, new_info)
-    raw.add_channels([new_raw], force_update_info=True)
-    montage = mne.channels.make_standard_montage('standard_1020')
-    raw.set_montage(montage, on_missing='ignore')
-    raw.info['bads'] = ['CP5', 'CP6', 'CP1', 'CP2']
-    raw.interpolate_bads(reset_bads=True)
-
-    df = raw.to_data_frame().set_index('time')
-    new_prepro = Preprocessor()
-    new_prepro.fit({'samplingFreq': fs, 'samplingFreqRaw': fs, 'channelNames': df.columns, 'studyType': 'eeg', 'numberOfChannels': df.shape[1]})
-    df = new_prepro.preprocess(df)
-    filtered = df['filtered']
-    cp5_p1 = filtered['CP5'] - filtered['CP1']
-    cp6_p2 = filtered['CP6'] - filtered['CP2']
-    
-    data = pd.DataFrame(index=df.index)
-    data['C3-P3'] = cp5_p1
-    data['C4-P4'] = cp6_p2
-    return data
-
 montage_dict = {
-    'full': STANDARD_BIPOLAR,
-    'ceribell': ['Fp1-F7','F7-T3','T3-T5','T5-O1','Fp2-F8','F8-T4','T4-T6','T6-O2'],
-    'epiminder_simulate': lambda raw: epiminder_simulate(raw), 
-    'epiminder_2': ['C3-P3', 'C4-P4'],
-    'epiminder_4': ['C3-P3', 'C4-P4', 'T3-T5', 'T4-T6'],
-    'uneeg_diag_bilateral_front': lambda df: custom_bipolar(df, ['F3-T3', 'F4-T4']), 
-    'uneeg_diag_left_front': lambda df: custom_bipolar(df, ['F3-T3']),
-    'uneeg_diag_right_front': lambda df: custom_bipolar(df, ['F4-T4']),
-    'uneeg_bilateral_front2': ['F7-T3', 'F8-T4'],
-    'uneeg_left_front': ['F7-T3'], 
+    'full': ['Fp1-F7', 'F7-T3', 'T3-T5', 'T5-O1', 'Fp2-F8', 'F8-T4', 'T4-T6', 'T6-O2',
+             'Fp1-F3', 'F3-C3', 'C3-P3', 'P3-O1', 'Fp2-F4', 'F4-C4', 'C4-P4', 'P4-O2'],
+    'uneeg_left_front': ['F7-T3'],
+    'uneeg_left_back': ['T3-T5'],
     'uneeg_right_front': ['F8-T4'],
-    'uneeg_vert_bilateral': lambda df: custom_bipolar(df, ['C3-T3', 'C4-T4']),
+    'uneeg_right_back': ['T4-T6'],
+    'uneeg_bilateral_back2': ['T3-T5', 'T4-T6'],
+    'uneeg_bilateral_front2': ['F7-T3', 'F8-T4'],
     'uneeg_vert_left': lambda df: custom_bipolar(df, ['C3-T3']),
     'uneeg_vert_right': lambda df: custom_bipolar(df, ['C4-T4']),
-    'uneeg_diag_bilateral_back': lambda df: custom_bipolar(df, ['P3-T3', 'P4-T4']),
+    'uneeg_diag_left_front': lambda df: custom_bipolar(df, ['F3-T3']),
     'uneeg_diag_left_back': lambda df: custom_bipolar(df, ['P3-T3']),
+    'uneeg_diag_right_front': lambda df: custom_bipolar(df, ['F4-T4']),
     'uneeg_diag_right_back': lambda df: custom_bipolar(df, ['P4-T4']),
-    'uneeg_bilateral_back2': ['T3-T5', 'T4-T6'],
-    'uneeg_left_back': ['T3-T5'],
-    'uneeg_right_back': ['T4-T6'],
+    'uneeg_diag_bilateral_front': lambda df: custom_bipolar(df, ['F3-T3', 'F4-T4']),
+    'uneeg_diag_bilateral_back': lambda df: custom_bipolar(df, ['P3-T3', 'P4-T4']),
+    'uneeg_vert_bilateral': lambda df: custom_bipolar(df, ['C3-T3', 'C4-T4']),
+    'epiminder_2': ['C3-P3', 'C4-P4'],
+    'ceribell': ['Fp1-F7','F7-T3','T3-T5','T5-O1','Fp2-F8','F8-T4','T4-T6','T6-O2']
 }
 
 # --- 4. DATA HANDLING HELPERS ---
-
-def load_edf_file(file_name):
-    # Preprocessing removed from this step to prevent Preprocessor Nyquist collisions
-    raw = mne.io.read_raw_edf(file_name, preload=True, verbose=0)
-    fs = raw.info['sfreq']
-    df = raw.to_data_frame().set_index('time')
-    times = raw.times
-    annotations = raw.annotations
-    label = np.zeros(len(times)).astype(int)
-    if annotations:
-        for anno in annotations:
-            label[(times >= anno['onset'])&(times <= anno['onset']+anno['duration'])] = 1
-    label_df = pd.DataFrame({'time':times,'labels':label})
-    return raw, df, label_df, fs
 
 def _get_montage_data(df, raw, montage_key):
     montage_processor = montage_dict[montage_key]
@@ -190,8 +148,6 @@ def _get_montage_data(df, raw, montage_key):
         data_df = preprocessed['BIPOLAR'].copy()
         valid_cols = [c for c in montage_processor if c in data_df.columns]
         data_df = data_df[valid_cols].copy()
-    elif 'simulate' in montage_key:
-        data_df = epiminder_simulate(raw)
     else:
         data_df = montage_processor(preprocessed)
         
@@ -205,7 +161,6 @@ def clean_array(arr, name="array"):
     return arr
 
 # --- 5. PREPROCESSING & MODEL HELPERS ---
-
 def preprocess_signal(data_df_montage, fs_raw):
     """ Applies 1-40Hz filtering, resamples to 200Hz, and performs AR(1) whitening """
     valid_channels = data_df_montage.columns.tolist()
@@ -330,70 +285,19 @@ def process_patient_dataset(patient_id, sz_files, ii_files, montage_key, prob_fo
             continue
     del model; gc.collect()
 
-# --- METRIC HELPERS & SMOOTHING ---
-
-def smooth_predictions(pred_binary, fs=1/W_STRIDE_SEC):
-    close_kernel_sec = 10 
-    close_k = int(close_kernel_sec * fs)
-    if close_k > 0:
-        pred_binary = binary_closing(pred_binary, structure=np.ones(close_k))
-
-    open_kernel_sec = 20
-    open_k = int(open_kernel_sec * fs)
-    if open_k > 0:
-        pred_binary = binary_opening(pred_binary, structure=np.ones(open_k))
-        
-    return pred_binary.astype(int)
-
-def extract_seiz_ranges(true_data):
-    diff_data = np.diff(np.concatenate([[0], np.squeeze(true_data), [0]]))
-    return list(zip(np.where(diff_data == 1)[0], np.where(diff_data == -1)[0]))
-
-def compute_metrics(true, pred, prob, stride=W_STRIDE_SEC): 
-    true, pred = np.squeeze(true), np.squeeze(pred)
-    seiz_ranges = extract_seiz_ranges(true)
-    pred_seiz_ranges = extract_seiz_ranges(pred)
-    metrics = {'total_dura': len(true) * stride / 60}
-    
-    if np.sum(true==0) > 0:
-        metrics['tn'] = np.sum((pred == 0) & (true == 0)) / np.sum(true == 0)
-    else: metrics['tn'] = np.nan
-    
-    if np.any(true == 1):
-        metrics.update({
-            'total_sz_dura': np.sum(true) * stride / 60,
-            'avg_sz_dura': np.mean([(end-start) * stride / 60 for start, end in seiz_ranges]),
-            'num_sz': len(seiz_ranges),
-            'auprc_sample': average_precision_score(true, prob),
-            'auroc_sample': roc_auc_score(true, prob)
-        })
-        sz_detected = [np.sum(pred[s:e]) >= min(0.2 * (e-s), 10) for s, e in seiz_ranges]
-        metrics['recall_event'] = np.mean(sz_detected) if sz_detected else np.nan
-    else:
-        for k in ['total_sz_dura', 'avg_sz_dura', 'num_sz', 'recall_event', 'auprc_sample', 'auroc_sample']:
-            metrics[k] = np.nan
-            
-    non_sz_dura_hr = (len(true) - np.sum(true)) * stride / 3600
-    if non_sz_dura_hr > 0:
-        num_fp = len(pred_seiz_ranges) - np.sum([np.any(true[s:e]) for s, e in pred_seiz_ranges])
-        metrics['fp'] = num_fp / non_sz_dura_hr
-    else: metrics['fp'] = np.nan
-    metrics['balanced_acc'] = np.nanmean([metrics.get('recall_event', np.nan), metrics.get('tn', np.nan)])
-    return metrics
-
 # =============================================================================
 # MAIN EXECUTION BLOCK
 # =============================================================================
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run DynaSD Patient-Wise Pipeline")
-    parser.add_argument("-d", "--data_folder", type=str, default='../../haoershi/emu_dataset')
-    parser.add_argument("-o", "--output_folder", type=str, default='dsosd_results')
-    parser.add_argument("-p", "--patient_info", type=str, default='/users/haoershi/emu_dataset/dataset_admission_info.csv')
+    parser.add_argument("-d", "--data_folder", type=str, default='emu_dataset')
+    parser.add_argument("-o", "--output_folder", type=str, default='ndd_results')
+    parser.add_argument("-p", "--patient_info", type=str, default='emu_dataset/dataset_admission_info.csv')
     parser.add_argument("-m", "--montage", type=str, default='all')
     parser.add_argument("--force", action='store_true')
-    parser.add_argument("--setting", type=str, default='fixed') 
-    parser.add_argument("--thres", type=float, default=0.0) 
+    parser.add_argument("--setting", type=str, default='') 
+    parser.add_argument("--thres", type=float, default=0.5) 
     parser.add_argument("--do_plot", action='store_true') 
     parser.add_argument("--n_jobs", type=int, default=10)
     
@@ -407,18 +311,17 @@ if __name__ == '__main__':
     metric_folder = os.path.join(params['output_folder'], 'metrics')
     
     # --- Locate Files ---
-    sz_folder = os.path.join(params['data_folder'], 'seizure')
-    ii_folder = os.path.join(params['data_folder'], 'interictal')
-    
-    if not os.path.exists(ii_folder):
-        ii_files_glob = sorted(glob.glob(os.path.join(params['data_folder'], '**', '*interictal*.edf'), recursive=True))
-    else:
-        ii_files_glob = sorted(glob.glob(os.path.join(ii_folder, '*.edf')))
-    sz_files_glob = sorted(glob.glob(os.path.join(sz_folder, '*.edf')))
-    
+    try:
+        all_files = glob.glob(f"{params['data_folder']}/**/*.edf", recursive=True)
+        if not all_files:
+            print(f"Warning: No .edf files found in {params['data_folder']}")
+    except Exception as e:
+        print(f"Error finding EDF files: {e}")
+        all_files = []
+
     # Group by Patient
     patient_map_files = {}
-    for f in sz_files_glob + ii_files_glob:
+    for f in all_files:
         pid = os.path.basename(f).split('_')[0]
         if pid not in patient_map_files: patient_map_files[pid] = {'sz': [], 'ii': []}
         if 'seizure' in os.path.basename(f).lower(): patient_map_files[pid]['sz'].append(f)
