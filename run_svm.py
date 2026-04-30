@@ -408,9 +408,9 @@ if __name__ == "__main__":
     )
 
     # =================================================================
-    # STEP 4: Generate Stats and Plots
+    # STEP 4: Generate Summary Stats
     # =================================================================
-    print("\n--- STEP 4: Generating Stats and Plots ---")
+    print("\n--- STEP 4: Generating Summary Stats ---")
     generate_stats_tables(
         montage_keys=montage_keys,
         metric_folder=metric_folder_setting,

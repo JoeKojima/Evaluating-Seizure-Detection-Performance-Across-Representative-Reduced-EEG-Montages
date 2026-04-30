@@ -17,11 +17,13 @@ This repository contains the code used in our study evaluating the performance o
 ├── run_sparcnet.py             # SPaRCNet pipeline: EDF → probabilities → predictions → metrics → figures
 ├── run_ndd.py                  # NDD (DynaSD) pipeline: patient-wise training and inference
 ├── run_svm.py                  # One-class SVM baseline with Youden's J thresholding
+├── manuscript_figures_generation.ipynb    # Notebook for generating figures, tables, and statistical analysis of the manuscript
 │
 ├── pipeline_functions/         # Shared utilities (see "Required Utility Files" below)
 │   ├── utils.py
 │   ├── feat_funcs.py
-│   └── utils_baseline.py
+│   ├── calc_metrics.py
+│   └── get_metrics.py
 │
 ├── SPARCNET/                   # SPaRCNet model (see "External Dependencies" below)
 │   ├── DenseNetClassifier.py
@@ -50,8 +52,8 @@ Step 3: Metric Calculation
         Binary predictions → event-wise sensitivity, FA/hr, F1, AUROC, AUPRC
         Stratified by epilepsy type, laterality, and seizure location
 
-Step 4: Stats & Figures (optional, --do_plot)
-        TableOne summaries + strip/box plots across montages and clinical subgroups
+Step 4: Summary Stats (optional)
+        TableOne summaries across montages and clinical subgroups
 ```
 
 ---
@@ -161,9 +163,9 @@ python run_svm.py \
 | `--montage`       | Comma-separated montage keys, or `all`                                                    | `all`     |
 | `--setting`       | Thresholding: `optimal` (Youden's J) or leave blank for fixed                             | `optimal` |
 | `--thres`         | Fixed threshold value (used when `--setting` is not `optimal`)                            | `0.5`     |
+| `--thres_file`         | File containing optimized threshold value (used when `--setting` is `optimal` or `optimal_f1`)                            | `0.5`     |
 | `--n_jobs`        | Number of parallel workers                                                                | `10`      |
 | `--force`         | Recompute and overwrite existing output files                                             | `False`   |
-| `--do_plot`       | Generate figures and TableOne stats tables                                                | `False`   |
 
 
 ---

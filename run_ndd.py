@@ -579,9 +579,9 @@ if __name__ == "__main__":
     )
 
     # =================================================================
-    # STEP 4: Generate Stats and Plots
+    # STEP 4: Generate Summary Stats
     # =================================================================
-    print("\n--- STEP 4: Generating Stats and Plots ---")
+    print("\n--- STEP 4: Generating Summary Stats ---")
     stats_folder = os.path.join(base_output_folder, "stats", setting_folder_name)
     generate_stats_tables(
         montage_keys=montage_keys,
