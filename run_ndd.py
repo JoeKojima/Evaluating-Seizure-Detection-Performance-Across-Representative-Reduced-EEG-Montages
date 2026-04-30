@@ -33,6 +33,7 @@ sys.path.append(ndd_path)
 try:
     from DynaSD import NDD
     from DynaSD.utils import ar_one
+
     print("Successfully imported DynaSD components", flush=True)
 except ImportError as e:
     print(
@@ -45,7 +46,11 @@ except ImportError as e:
 # These files must exist in your 'pipeline_functions' and 'DynaSD-wo_dev' folders
 try:
     from feat_funcs import get_event_smoothed_pred, smooth_pred
-    from get_metrics import calculate_metrics_for_montages, generate_stats_tables
+    from get_metrics import (
+        calculate_metrics_for_montages,
+        generate_stats_tables,
+        get_optimal_thres,
+    )
     from utils import Preprocessor, load_edf_file
 except ImportError as e:
     print(f"FATAL ERROR: Could not import required pipeline components. Missing: {e}")
@@ -122,7 +127,9 @@ def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
 
+
 set_seed(5210)
+
 
 def custom_bipolar(df, pairs):
     filtered = df["filtered"]
@@ -161,10 +168,8 @@ def custom_bipolar(df, pairs):
 
 
 # --- 4. DATA HANDLING HELPERS ---
-
-def _get_montage_data(df, raw, montage_key):
-    montage_processor = montage_dict[montage_key]
-
+def _preprocess_edf(df, raw):
+    """Run DynaSD Preprocessor on raw EDF frame (same order as run_svm.process_pat)."""
     fs = raw.info["sfreq"]
     prepro = Preprocessor()
     prepro.fit(
@@ -176,15 +181,18 @@ def _get_montage_data(df, raw, montage_key):
             "numberOfChannels": df.shape[1],
         }
     )
-    preprocessed = prepro.preprocess(df)
+    return prepro.preprocess(df)
 
+
+def _montage_from_preprocessed(preprocessed, montage_key):
+    """Select montage channels from an already-preprocessed dict (after preprocess)."""
+    montage_processor = montage_dict[montage_key]
     if isinstance(montage_processor, list):
         data_df = preprocessed["BIPOLAR"].copy()
         valid_cols = [c for c in montage_processor if c in data_df.columns]
         data_df = data_df[valid_cols].copy()
     else:
         data_df = montage_processor(preprocessed)
-
     return data_df
 
 
@@ -200,177 +208,204 @@ def clean_array(arr, name="array"):
 def preprocess_signal(data_df_montage, fs_raw):
     """Applies 1-40Hz filtering, resamples to 200Hz, and performs AR(1) whitening"""
     valid_channels = data_df_montage.columns.tolist()
-    eeg_data_array = clean_array(data_df_montage[valid_channels].values.T, "raw EEG")
-
+    # eeg_data_array = clean_array(data_df_montage[valid_channels].values.T, "raw EEG")
     try:
-        # 1-40Hz Bandpass filter matched to SPaRCNet
-        # filtered_data = filter_data(
-        #     eeg_data_array, fs_raw, 1.0, 40.0, method="iir", verbose=False
-        # )
-        # filtered_data = clean_array(filtered_data, "filtered")
-
-        # # Resample to FS_NDD (200 Hz)
-        # num_samples_ndd = int(filtered_data.shape[1] / fs_raw * FS_NDD)
-        # data_ndd_array = scipy.signal.resample(filtered_data, num_samples_ndd, axis=1).T
-        # data_ndd_array = clean_array(data_ndd_array, "resampled")
-
-        # DynaSD AR(1) Whitening
-        data_whitened = ar_one(eeg_data_array)
-        data_whitened = clean_array(data_whitened, "whitened")
-
-        return pd.DataFrame(data_whitened, columns=valid_channels)
+        data_df_montage.iloc[1:, :] = ar_one(data_df_montage.values)
+        return data_df_montage
     except Exception as e:
         print(f"    Preprocessing failed: {e}")
         return None
 
 
 def process_patient_dataset(
-    patient_id, sz_files, ii_files, montage_key, prob_folder, force
+    patient_id, sz_files, ii_files, montage_keys, prob_folder, force
 ):
+    """Like run_svm.process_pat: preprocess each EDF once, then loop montages to sample."""
     warnings.filterwarnings("ignore")
     all_files = sorted(sz_files + ii_files)
 
-    if not force:
-        pending_files = [
-            f
-            for f in all_files
-            if not os.path.exists(
+    training_candidates = sorted(ii_files)
+    if not training_candidates:
+        return
+
+    def montage_has_pending(montage_key):
+        if force:
+            return True
+        return any(
+            not os.path.exists(
                 os.path.join(
                     prob_folder,
                     montage_key,
                     os.path.basename(f).replace(".edf", ".csv"),
                 )
             )
-        ]
-        if not pending_files:
-            return  # All outputs already exist for this patient/montage; nothing to do
+            for f in all_files
+        )
 
-    # --- TRAINING STEP (First 60s of Earliest Interictal with valid channels) ---
-    # Try interictal files in order, fall back to seizure files if all interictal fail.
-    training_candidates = sorted(ii_files)
-    if not training_candidates:
+    montages_active = [m for m in montage_keys if montage_has_pending(m)]
+    if not montages_active:
         return
 
-    model = NDD(
-        hidden_size=10,
-        fs=FS_NDD,
-        sequence_length=12,
-        forecast_length=1,
-        w_size=W_SIZE_SEC,
-        w_stride=W_STRIDE_SEC,
-        num_epochs=10,
-        batch_size="full",
-        lr=0.01,
-        use_cuda=torch.cuda.is_available(),
-        verbose=False,
-    )
+    models = {}
+    trained = set()
 
-    model_trained = False
+    # --- TRAINING: one preprocess per interictal file, then sample each montage ---
     for training_file in training_candidates:
+        if len(trained) == len(montages_active):
+            break
         try:
             raw, df_raw, _, fs_raw = load_edf_file(training_file)
-            data_df_montage = _get_montage_data(df_raw, raw, montage_key)
-            if data_df_montage.shape[1] == 0:
-                print(
-                    f"  [{patient_id}:{montage_key}] No valid channels in {os.path.basename(training_file)}, trying next file..."
-                )
-                continue
-
-            data_ndd_final = preprocess_signal(data_df_montage, fs_raw)
-            if data_ndd_final is None:
-                print(
-                    f"  [{patient_id}:{montage_key}] Preprocessing failed for {os.path.basename(training_file)}, trying next file..."
-                )
-                continue
-
-            train_end_idx = int(TRAIN_DURATION_SEC * FS_NDD)
-            X_train = (
-                data_ndd_final.iloc[:train_end_idx]
-                if len(data_ndd_final) > train_end_idx
-                else data_ndd_final
-            )
-            model.fit(X_train)
-            model_trained = True
-            break
-
+            preprocessed = _preprocess_edf(df_raw, raw)
         except Exception as e:
             print(
-                f"  [{patient_id}:{montage_key}] Training failed on {os.path.basename(training_file)}: {e}, trying next file..."
+                f"  [{patient_id}] Could not load/preprocess {os.path.basename(training_file)}: {e}"
             )
             continue
 
-    if not model_trained:
-        print(
-            f"  [{patient_id}:{montage_key}] No valid training file found across all candidates. Skipping."
-        )
-        return
+        for montage_key in montages_active:
+            if montage_key in trained:
+                continue
+            try:
+                data_df_montage = _montage_from_preprocessed(preprocessed, montage_key)
+                if data_df_montage.shape[1] == 0:
+                    print(
+                        f"  [{patient_id}:{montage_key}] No valid channels in {os.path.basename(training_file)}, trying next file for this montage..."
+                    )
+                    continue
 
-    # --- INFERENCE STEP ---
+                data_ndd_final = preprocess_signal(data_df_montage, fs_raw)
+                if data_ndd_final is None:
+                    print(
+                        f"  [{patient_id}:{montage_key}] NDD pipeline preprocess failed for {os.path.basename(training_file)}, trying next file..."
+                    )
+                    continue
+
+                train_end_idx = int(TRAIN_DURATION_SEC * FS_NDD)
+                X_train = (
+                    data_ndd_final.iloc[:train_end_idx]
+                    if len(data_ndd_final) > train_end_idx
+                    else data_ndd_final
+                )
+                model = NDD(
+                    hidden_size=10,
+                    fs=FS_NDD,
+                    sequence_length=12,
+                    forecast_length=1,
+                    w_size=W_SIZE_SEC,
+                    w_stride=W_STRIDE_SEC,
+                    num_epochs=10,
+                    batch_size="full",
+                    lr=0.01,
+                    use_cuda=torch.cuda.is_available(),
+                    verbose=False,
+                )
+                model.fit(X_train)
+                models[montage_key] = model
+                trained.add(montage_key)
+            except Exception as e:
+                print(
+                    f"  [{patient_id}:{montage_key}] Training failed on {os.path.basename(training_file)}: {e}"
+                )
+                continue
+
+    for montage_key in montages_active:
+        if montage_key not in trained:
+            print(
+                f"  [{patient_id}:{montage_key}] No valid training file found across all candidates. Skipping inference for this montage."
+            )
+
+    # --- INFERENCE: one preprocess per recording, then sample each montage ---
     for file_name in all_files:
         base_name = os.path.basename(file_name)
-        output_file = os.path.join(
-            prob_folder, montage_key, base_name.replace(".edf", ".csv")
-        )
-        if os.path.exists(output_file) and not force:
+        if not force and not any(
+            montage_key in models
+            and not os.path.exists(
+                os.path.join(
+                    prob_folder, montage_key, base_name.replace(".edf", ".csv")
+                )
+            )
+            for montage_key in montages_active
+        ):
             continue
 
         try:
             raw, df_raw, label_df, fs_raw = load_edf_file(file_name)
-            data_df_montage = _get_montage_data(df_raw, raw, montage_key)
-            if data_df_montage.shape[1] == 0:
-                print(
-                    f"  [{patient_id}:{montage_key}] Skipping {base_name}: no valid channels for this montage"
-                )
-                continue
-
-            data_ndd_final = preprocess_signal(data_df_montage, fs_raw)
-            if data_ndd_final is None:
-                print(
-                    f"  [{patient_id}:{montage_key}] Skipping {base_name}: preprocessing returned None"
-                )
-                continue
-
-            sz_prob_df = model(data_ndd_final)
-            sz_prob_df = sz_prob_df.apply(
-                lambda col: clean_array(col.values, col.name), axis=0
-            )
-            sz_prob_times = model.get_win_times(len(data_ndd_final))
-
-            min_len = min(len(sz_prob_df), len(sz_prob_times))
-            sz_prob_df = sz_prob_df.iloc[:min_len]
-            sz_prob_times = sz_prob_times[:min_len]
-
-            sz_prob_agg = np.nanmean(sz_prob_df.values, axis=1)
-
-            feature_time_index = df_raw.index.min() + sz_prob_times
-            label_time = label_df.set_index("time")["labels"]
-            label = clean_array(
-                label_time.reindex(feature_time_index, method="nearest").values[
-                    :min_len
-                ]
-            )
-
-            out_data = {
-                "sz_prob": sz_prob_agg,
-                "label": label
-            }
-            # Save Per-Channel Probabilities
-            for col in sz_prob_df.columns:
-                out_data[f"prob_{col}"] = sz_prob_df[col].values
-
-            pred_df = pd.DataFrame(out_data, index=feature_time_index)
-            pred_df.index = pd.to_datetime(pred_df.index, unit="s")
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-            pred_df.to_csv(output_file)
-
+            preprocessed = _preprocess_edf(df_raw, raw)
         except Exception as e:
-            print(f"  [{patient_id}:{montage_key}] Error inferring {base_name}: {e}")
+            print(f"  [{patient_id}] Error loading {base_name}: {e}")
             continue
-    del model
+
+        for montage_key in montages_active:
+            if montage_key not in models:
+                continue
+            output_file = os.path.join(
+                prob_folder, montage_key, base_name.replace(".edf", ".csv")
+            )
+            if os.path.exists(output_file) and not force:
+                continue
+
+            try:
+                data_df_montage = _montage_from_preprocessed(preprocessed, montage_key)
+                if data_df_montage.shape[1] == 0:
+                    print(
+                        f"  [{patient_id}:{montage_key}] Skipping {base_name}: no valid channels for this montage"
+                    )
+                    continue
+
+                data_ndd_final = preprocess_signal(data_df_montage, fs_raw)
+                if data_ndd_final is None:
+                    print(
+                        f"  [{patient_id}:{montage_key}] Skipping {base_name}: preprocessing returned None"
+                    )
+                    continue
+
+                model = models[montage_key]
+                sz_prob_df = model(data_ndd_final)
+                sz_prob_df = sz_prob_df.apply(
+                    lambda col: clean_array(col.values, col.name), axis=0
+                )
+                sz_prob_times = model.get_win_times(len(data_ndd_final))
+
+                min_len = min(len(sz_prob_df), len(sz_prob_times))
+                sz_prob_df = sz_prob_df.iloc[:min_len]
+                sz_prob_times = sz_prob_times[:min_len]
+
+                sz_prob_agg = np.nanmean(sz_prob_df.values, axis=1)
+
+                feature_time_index = df_raw.index.min() + sz_prob_times
+                label_time = label_df.set_index("time")["labels"]
+                label = clean_array(
+                    label_time.reindex(feature_time_index, method="nearest").values[
+                        :min_len
+                    ]
+                )
+
+                out_data = {"sz_prob": sz_prob_agg, "label": label}
+                for col in sz_prob_df.columns:
+                    out_data[f"prob_{col}"] = sz_prob_df[col].values
+
+                pred_df = pd.DataFrame(out_data, index=feature_time_index)
+                pred_df.index = pd.to_datetime(pred_df.index, unit="s")
+                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                pred_df.to_csv(output_file)
+
+            except Exception as e:
+                print(
+                    f"  [{patient_id}:{montage_key}] Error inferring {base_name}: {e}"
+                )
+                continue
+
+    for _k in list(models.keys()):
+        del models[_k]
     gc.collect()
 
 
-def process_file_pred(file_name, thres=None, avg=True):
+def _get_prob_ndd(prob_df):
+    prob_mat = prob_df[[c for c in prob_df.columns if c.startswith("prob")]].values
+    return prob_mat.mean(axis=1)
+
+
+def process_file_pred(file_name, thres=None):
     warnings.filterwarnings("ignore")
     out_file = os.path.join(
         pred_folder, setting_folder_name, m, file_name.split("/")[-1]
@@ -378,18 +413,13 @@ def process_file_pred(file_name, thres=None, avg=True):
     if not force and os.path.exists(out_file):
         return
     prob_df = pd.read_csv(file_name, index_col=0)
-    prob_mat = prob_df[[c for c in prob_df.columns if c.startswith("prob")]].values
-    sz_prob = prob_mat.mean(axis=1)
-    if avg:
-        pred = (sz_prob >= thres).astype(int)
-    else:
-        pred = (prob_mat >= thres).astype(int)
-        pred = pred.sum(axis=1) >= min(2, pred.shape[1])
+    sz_prob = _get_prob_ndd(prob_df)
+    pred = (sz_prob >= thres).astype(int)
     pred = get_event_smoothed_pred(
         smooth_pred(pred),
         gap_num=int(4 / feat_setting_ndd["stride"]),
         min_event_num=int(20 / feat_setting_ndd["stride"]),
-    )  
+    )
     pred_df = pd.DataFrame(
         np.vstack([sz_prob, pred]).T, columns=["sz_prob", "pred"], index=prob_df.index
     )
@@ -459,6 +489,7 @@ if __name__ == "__main__":
     # Group by Patient
     try:
         all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
+        all_files = sorted(all_files)
         if not all_files:
             print(f"Warning: No .edf files found in {base_data_folder}")
     except Exception as e:
@@ -482,15 +513,20 @@ if __name__ == "__main__":
     # --- STEP 1: Process Patients (Train & Inference) ---
     print(f"\n--- STEP 1: Generating Probabilities ---", flush=True)
     all_tasks = []
-    for m in montage_keys:
-        for pid, files in patient_map_files.items():
-            if not files["sz"] and not files["ii"]:
-                continue
-            all_tasks.append(
-                delayed(process_patient_dataset)(
-                    pid, files["sz"], files["ii"], m, prob_folder, params["force"]
-                )
+
+    for pid, files in patient_map_files.items():
+        if not files["sz"] and not files["ii"]:
+            continue
+        all_tasks.append(
+            delayed(process_patient_dataset)(
+                pid,
+                files["sz"],
+                files["ii"],
+                montage_keys,
+                prob_folder,
+                params["force"],
             )
+        )
 
     Parallel(n_jobs=params["n_jobs"])(tqdm(all_tasks, desc="Processing patient"))
 
@@ -508,22 +544,13 @@ if __name__ == "__main__":
             continue
 
         if "optimal_f1" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "NDD") & (threses["montage"] == m)
-                ]["thres_f1"].iloc[0]
-            else:
-                print("  Calculating optimal threshold...")
-                current_thres = get_optimal_thres_f1(prob_files)
+            current_thres = get_optimal_thres(
+                prob_files, _get_prob_ndd, params["thres_file"], method="f1"
+            )
         elif "optimal" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "NDD") & (threses["montage"] == m)
-                ]["thres_yodenj"].iloc[0]
-            else:
-                current_thres = get_optimal_thres(prob_files)
+            current_thres = get_optimal_thres(
+                prob_files, _get_prob_ndd, params["thres_file"], method="yodenj"
+            )
         else:
             current_thres = thres_val
         print(f"  Optimal threshold for {m}: {current_thres:.4f}")

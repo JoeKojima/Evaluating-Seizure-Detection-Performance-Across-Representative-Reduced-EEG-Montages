@@ -5,6 +5,7 @@ ENV/
 env/
 .python-version
 .matplotlib_cache/
+.ruff_cache/
 
 # Python
 __pycache__/
@@ -12,6 +13,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
+# Results
+results/
+logs/
+models/
+checkpoints/
+
 build/
 dist/
 sdist/

@@ -76,5 +76,3 @@ def compute_metrics(true, pred, prob, stride=2):
     metrics["f1_event"] = scores.f1
 
     return metrics
-
-

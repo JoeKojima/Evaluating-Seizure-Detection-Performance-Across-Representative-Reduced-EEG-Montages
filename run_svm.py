@@ -34,7 +34,11 @@ try:
         smooth_pred,
         train_one_class_svm,
     )
-    from get_metrics import calculate_metrics_for_montages, generate_stats_tables
+    from get_metrics import (
+        calculate_metrics_for_montages,
+        generate_stats_tables,
+        get_optimal_thres,
+    )
     from utils import Preprocessor, load_edf_file
 except ImportError as e:
     print(f"FATAL ERROR: Could not import required pipeline components. Missing: {e}")
@@ -99,6 +103,7 @@ feat_setting_svm = {
     "lowcut": 1,
     "highcut": 40,
 }
+
 
 # --- 3. HELPER FUNCTIONS (LOCAL DEFINITIONS) ---
 def custom_bipolar(df, pairs):
@@ -229,39 +234,9 @@ def process_pat(pat, group):
             pred_df_final.to_csv(prob_path)
 
 
-def get_optimal_thres(prob_files):
-    """Calculates optimal threshold using Youden's J statistic (TPR - FPR).
-    Only uses seizure files — IIC files have all-zero labels and would
-    degenerate the ROC curve, pushing the threshold to 1.
-    """
-    all_prob = []
-    all_label = []
-    for f in prob_files:
-        # Skip non-seizure files
-        basename = os.path.basename(f).lower()
-        if "seizure" not in basename and "event" not in basename:
-            continue
-        try:
-            prob_df = pd.read_csv(f, index_col=0)
-            all_prob.extend(prob_df["sz_prob"].values)
-            all_label.extend(prob_df["label"].values)
-        except Exception:
-            continue
-
-    if not all_label or not np.any(np.array(all_label) == 1):
-        print(
-            "    Warning: No positive labels found in seizure files. Using fallback threshold 0.5."
-        )
-        return 0.5
-
-    fpr, tpr, thres = roc_curve(all_label, all_prob)
-    # Youden's J statistic
-    opt_thres = thres[np.argmax(tpr - fpr)]
-    return opt_thres
-
-
-def get_optimal_thres_f1(prob_files, stride):
-    pass
+def _get_prob_svm(prob_df):
+    prob_mat = prob_df[[c for c in prob_df.columns if c.startswith("nu_hat")]].values
+    return prob_mat.mean(axis=1)
 
 
 def process_file_pred(file_name, thres=0.99, avg=True):
@@ -270,13 +245,8 @@ def process_file_pred(file_name, thres=0.99, avg=True):
     if not force and os.path.exists(out_file):
         return
     prob_df = pd.read_csv(file_name, index_col=0)
-    prob_mat = prob_df[[c for c in prob_df.columns if c.startswith("nu_hat")]].values
-    sz_prob = prob_mat.mean(axis=1)
-    if avg:
-        pred = detect_seizure(sz_prob, threshold=thres)
-    else:
-        pred_mat = (prob_mat >= thres).astype(int)
-        pred = pred_mat.sum(axis=1) >= min(2, pred_mat.shape[1])
+    sz_prob = _get_prob_svm(prob_df)
+    pred = detect_seizure(sz_prob, threshold=thres)
     pred = get_event_smoothed_pred(
         smooth_pred(pred),
         gap_num=int(4 / feat_setting_svm["stride"]),
@@ -407,22 +377,13 @@ if __name__ == "__main__":
             continue
 
         if "optimal_f1" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "SVM") & (threses["montage"] == m)
-                ]["thres_f1"].iloc[0]
-            else:
-                print("  Calculating optimal threshold...")
-                current_thres = get_optimal_thres_f1(prob_files)
+            current_thres = get_optimal_thres(
+                prob_files, _get_prob_svm, params["thres_file"], method="f1"
+            )
         elif "optimal" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "SVM") & (threses["montage"] == m)
-                ]["thres_yodenj"].iloc[0]
-            else:
-                current_thres = get_optimal_thres(prob_files)
+            current_thres = get_optimal_thres(
+                prob_files, _get_prob_svm, params["thres_file"], method="yodenj"
+            )
         else:
             current_thres = thres_val
         print(f"  Optimal threshold for {m}: {current_thres:.4f}")

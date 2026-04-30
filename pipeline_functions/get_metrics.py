@@ -1,5 +1,6 @@
 import os
 import glob
+from joblib import Parallel, delayed
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,10 @@ from tqdm import tqdm
 
 from calc_metrics import compute_metrics, metric_labels
 from utils import flatten_tableone
+from feat_funcs import apply_persistence, get_event_smoothed_pred, smooth_pred
+from sklearn.metrics import roc_curve
+from timescoring import scoring
+from timescoring.annotations import Annotation
 
 metric_use = [
     "auroc_sample",
@@ -18,6 +23,126 @@ metric_use = [
     "fp",
 ]
 metric_use_labels = [metric_labels.get(k, k) for k in metric_use]
+model_label_map = {
+    "sparcnet": "SPaRCNet",
+    "ndd": "NDD",
+    "svm": "SVM",
+}
+model_stride = {
+    "sparcnet": 2,
+    "ndd": 0.5,
+    "svm": 0.5,
+}
+
+
+def compute_eventwise_scores(model_data, t, model):
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    stride = model_stride[model]
+    all_scores = []
+    for _, group in model_data.groupby("event_id"):
+        true = group["label"].values
+        prob = group["sz_prob"].values
+        pred = (prob >= t).astype(int)
+        pred = get_event_smoothed_pred(
+            smooth_pred(pred), gap_num=int(4 / stride), min_event_num=int(20 / stride)
+        )
+        if model == "SVM":
+            pred = apply_persistence(pred)
+        metrics = compute_metrics(true, pred, prob, stride)
+        metrics["patient"] = group["patient"].iloc[0]
+        all_scores.append(metrics)
+    all_scores = pd.DataFrame(all_scores)
+    agg_scores = []
+    for name, group in all_scores.groupby(["patient"]):
+        recall = np.nanmean(group["recall_event"].values)
+        fp = np.nanmean(group["fp"].values)
+        perc = np.nansum(group["precision_event"] * group["num_pred"]) / np.nansum(
+            group["num_pred"]
+        )
+        f1 = 2 * recall * perc / (recall + perc)
+        agg_scores.append([recall, fp, perc, f1])
+    agg_scores = np.array(agg_scores)
+    agg_scores[np.isnan(agg_scores)] = 0.0
+    agg_scores[np.isinf(agg_scores)] = 0.0
+    agg_scores = np.nanmean(np.array(agg_scores), axis=0)
+    return agg_scores
+
+
+def get_optimal_thres(prob_files, prob_func, thres_file, method="f1"):
+    # this only runs with prob_files from one model and one montage
+    montage = prob_files[0].split("/")[-2]
+    model = prob_files[0].split("/")[-3].split("_")[0]
+    model_label = model_label_map[model]
+    if thres_file is not None:
+        if os.path.exists(thres_file):
+            threses = pd.read_csv(thres_file)
+            thres_row = threses[
+                (threses["model"] == model_label) & (threses["montage"] == montage)
+            ]
+            if len(thres_row) > 0:
+                return thres_row["thres_" + method].iloc[-1]
+            else:
+                print(f"No threshold found for {model_label} {montage} in {thres_file}")
+        else:
+            print("No threshold file found\nCalculating optimal threshold...")
+    print("No threshold file provided\nCalculating optimal threshold...")
+
+    all_data = []
+    for f in prob_files:
+        try:
+            prob_df = pd.read_csv(f, index_col=0)
+            sz_prob = prob_func(prob_df)  # Assuming SZ is column 1 (0-indexed)
+            label = prob_df["label"].values
+        except Exception as e:
+            print(f"Error reading prob file {f}: {e}")
+            continue
+        tmp = pd.DataFrame({"sz_prob": sz_prob, "label": label})
+        tmp["event_id"] = f[:-4]
+        all_data.append(tmp)
+    all_data = pd.concat(all_data)
+    all_data["patient"] = all_data["event_id"].apply(lambda x: x.split("_")[0])
+
+    fpr, tpr, thres = roc_curve(all_data["sz_prob"].values, all_data["label"].values)
+    opt_thres_yodenj = thres[np.argmax(tpr - fpr)]
+
+    N = 200
+    if len(thres) > N:
+        idx = np.linspace(0, len(thres) - 1, N).astype(int)
+        thres = thres[idx]
+    results = Parallel(n_jobs=40)(
+        delayed(compute_eventwise_scores)(all_data, t, model) for t in thres
+    )
+    sens, far, perc, f1 = zip(*results)
+    sens = np.array(list(sens))
+    far = np.array(list(far))
+    perc = np.array(list(perc))
+    f1 = np.array(list(f1))
+    f1[0] = 0.0
+    f1[-1] = 0.0
+    opt_thres_f1 = thres[np.argmax(f1)]
+    thres_row = pd.DataFrame(
+        [
+            {
+                "model": model_label,
+                "montage": montage,
+                "thres_yodenj": opt_thres_yodenj,
+                "thres_f1": opt_thres_f1,
+            }
+        ]
+    )
+    if thres_file is not None:
+        if os.path.exists(thres_file):
+            thres_row.to_csv(thres_file, mode="a", header=False, index=False)
+        else:
+            thres_row.to_csv(thres_file, index=False)
+    if method == "yodenj":
+        return opt_thres_yodenj
+    elif method == "f1":
+        return opt_thres_f1
+    else:
+        raise ValueError(f"Invalid method: {method}")
 
 
 def patient_metrics(pred_file_df, stride):
@@ -75,6 +200,7 @@ def patient_metrics(pred_file_df, stride):
         ["precision_event", "f1_event"]
     ].fillna(0.0)
     return all_metrics
+
 
 def calculate_metrics_for_montages(
     montage_keys, pred_folder_setting, metric_folder, stride, force

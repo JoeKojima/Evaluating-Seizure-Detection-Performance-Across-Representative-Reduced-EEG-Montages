@@ -11,9 +11,6 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from joblib import Parallel, delayed
-from sklearn.metrics import roc_curve
-from timescoring import scoring
-from timescoring.annotations import Annotation
 from tqdm import tqdm
 
 # --- Setup Environment ---
@@ -34,7 +31,11 @@ sys.path.append(sparcnet_path)
 try:
     from DenseNetClassifier import *  # noqa: F401 (needed for torch.load)
     from feat_funcs import get_event_smoothed_pred, smooth_pred
-    from get_metrics import calculate_metrics_for_montages, generate_stats_tables
+    from get_metrics import (
+        calculate_metrics_for_montages,
+        generate_stats_tables,
+        get_optimal_thres,
+    )
     from utils import (
         bandpass_filter,
         downsample,
@@ -168,6 +169,7 @@ def custom_bipolar(df, pairs):
             pass
     return data
 
+
 def sparcnet_single(data, fs):
     if "Fz-Cz" in data.columns:
         data = data.drop(columns=["Fz-Cz"])
@@ -189,6 +191,7 @@ def sparcnet_single(data, fs):
     output, _ = model_cnn(data)
     sz_prob = F.softmax(output, 1).detach().cpu().numpy().flatten()
     return sz_prob
+
 
 def process_file_sparcnet(file_name):
     """
@@ -321,66 +324,8 @@ def process_file_sparcnet(file_name):
 # =============================================================================
 
 
-def get_optimal_thres(prob_files):
-    all_prob = []
-    all_label = []
-    for f in prob_files:
-        try:
-            prob_df = pd.read_csv(f, index_col=0)
-            sz_prob = prob_df["LPD"].values  # Assuming SZ is column 1 (0-indexed)
-            label = prob_df["label"].values
-            all_prob.extend(sz_prob)
-            all_label.extend(label)
-        except Exception as e:
-            print(f"Error reading prob file {f}: {e}")
-            continue
-
-    if not all_label:
-        print(
-            "Warning: No labels found for optimal threshold calculation. Defaulting to 0.5."
-        )
-        return 0.5
-
-    fpr, tpr, thres = roc_curve(all_label, all_prob)
-    opt_thres = thres[np.argmax(tpr - fpr)]
-    return opt_thres
-
-
-def compute_eventwise_f1(true, prob, t, stride):
-    pred = (prob >= t).astype(int)
-    labels = Annotation(true, 1 / stride)
-    preds = Annotation(pred, 1 / stride)
-    param = scoring.EventScoring.Parameters(
-        toleranceStart=30,
-        toleranceEnd=60,
-        minOverlap=0,
-        maxEventDuration=5 * 60,
-        minDurationBetweenEvents=90,
-    )
-    scores = scoring.EventScoring(labels, preds, param)
-    return scores.f1
-
-
-def get_optimal_thres_f1(prob_files, stride):
-    true = []
-    prob = []
-    for f in prob_files:
-        prob_df = pd.read_csv(f, index_col=0)
-        sz_prob = prob_df["LPD"].values
-        label = prob_df["label"].values
-        prob.extend(sz_prob)
-        true.extend(label)
-    _, _, thres = roc_curve(true, prob)
-    N = 200
-    if len(thres) > N:
-        idx = np.linspace(0, len(thres) - 1, N).astype(int)
-        thres = thres[idx]
-    results = Parallel(n_jobs=40)(
-        delayed(compute_eventwise_f1)(true, prob, t, stride) for t in thres
-    )
-    opt_ind = np.argmax(results)
-    opt_thres = thres[opt_ind]
-    return opt_thres
+def _get_prob_sparcnet(prob_df):
+    return prob_df.iloc[:, 1].values
 
 
 def process_file_pred(file_name):
@@ -406,8 +351,7 @@ def process_file_pred(file_name):
         print(f"Error reading prob file {file_name}: {e}")
         return
 
-    prob = prob_df.iloc[:, :6].values
-    sz_prob = prob[:, 1]
+    sz_prob = _get_prob_sparcnet(prob_df)
     pred = (sz_prob >= thres).astype(int)
     pred = get_event_smoothed_pred(
         smooth_pred(pred),
@@ -563,22 +507,13 @@ if __name__ == "__main__":
             continue
 
         if "optimal_f1" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "SPaRCNet") & (threses["montage"] == m)
-                ]["thres_f1"].iloc[0]
-            else:
-                print("  Calculating optimal threshold...")
-                current_thres = get_optimal_thres_f1(prob_files)
+            current_thres = get_optimal_thres(
+                params["thres_file"], prob_files, _get_prob_sparcnet, method="f1"
+            )
         elif "optimal" in setting_folder_name:
-            if params["thres_file"]:
-                threses = pd.read_csv(params["thres_file"])
-                current_thres = threses[
-                    (threses["model"] == "SPaRCNet") & (threses["montage"] == m)
-                ]["thres_yodenj"].iloc[0]
-            else:
-                current_thres = get_optimal_thres(prob_files)
+            current_thres = get_optimal_thres(
+                params["thres_file"], prob_files, _get_prob_sparcnet, method="yodenj"
+            )
         else:
             current_thres = thres_val
         print(f"  Optimal threshold for {m}: {current_thres:.4f}")
