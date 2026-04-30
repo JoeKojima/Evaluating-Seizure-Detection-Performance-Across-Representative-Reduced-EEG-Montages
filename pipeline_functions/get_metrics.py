@@ -73,7 +73,7 @@ def compute_eventwise_scores(model_data, t, model):
 def get_optimal_thres(prob_files, prob_func, thres_file, method="f1"):
     # this only runs with prob_files from one model and one montage
     montage = prob_files[0].split("/")[-2]
-    model = prob_files[0].split("/")[-3].split("_")[0]
+    model = prob_files[0].split("/")[-4].split("_")[0]
     model_label = model_label_map[model]
     if thres_file is not None:
         if os.path.exists(thres_file):
@@ -87,7 +87,8 @@ def get_optimal_thres(prob_files, prob_func, thres_file, method="f1"):
                 print(f"No threshold found for {model_label} {montage} in {thres_file}")
         else:
             print("No threshold file found\nCalculating optimal threshold...")
-    print("No threshold file provided\nCalculating optimal threshold...")
+    else:
+        print("No threshold file provided\nCalculating optimal threshold...")
 
     all_data = []
     for f in prob_files:
@@ -104,7 +105,7 @@ def get_optimal_thres(prob_files, prob_func, thres_file, method="f1"):
     all_data = pd.concat(all_data)
     all_data["patient"] = all_data["event_id"].apply(lambda x: x.split("_")[0])
 
-    fpr, tpr, thres = roc_curve(all_data["sz_prob"].values, all_data["label"].values)
+    fpr, tpr, thres = roc_curve(all_data["label"].values, all_data["sz_prob"].values)
     opt_thres_yodenj = thres[np.argmax(tpr - fpr)]
 
     N = 200

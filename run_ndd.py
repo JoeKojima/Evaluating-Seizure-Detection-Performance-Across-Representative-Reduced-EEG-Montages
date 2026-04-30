@@ -582,9 +582,7 @@ if __name__ == "__main__":
     # STEP 4: Generate Stats and Plots
     # =================================================================
     print("\n--- STEP 4: Generating Stats and Plots ---")
-    figure_folder = os.path.join(base_output_folder, "figures", setting_folder_name)
     stats_folder = os.path.join(base_output_folder, "stats", setting_folder_name)
-    os.makedirs(figure_folder, exist_ok=True)
     generate_stats_tables(
         montage_keys=montage_keys,
         metric_folder=metric_folder,

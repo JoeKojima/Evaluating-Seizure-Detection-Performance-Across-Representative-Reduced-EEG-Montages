@@ -83,3 +83,6 @@ dso_results/
 
 # SVM
 svm_results/
+
+# Manuscript
+manuscript/
