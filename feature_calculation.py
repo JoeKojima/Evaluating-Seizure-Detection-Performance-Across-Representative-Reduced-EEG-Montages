@@ -30,9 +30,9 @@ except ImportError as e:
     print(f"Missing: {e}")
 
 # --- CONFIGURATION ---
-DATA_DIR = "../emu_dataset"
-METRICS_FILE = "sparcnet_results/metrics/thres_optimal_f1/full/segment_metrics.csv"
-OUTPUT_DIR = "feature_data"
+DATA_DIR = "data/emu_dataset"
+METRICS_FILE = "data/sparcnet_results/metrics/thres_optimal_f1/full/segment_metrics.csv"
+OUTPUT_DIR = "data/feature_data"
 WINDOW_SEC = 5  # 5-second non-overlapping windows
 
 STANDARD_BIPOLAR = [

@@ -433,13 +433,18 @@ def process_file_pred(file_name, thres=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run DynaSD Patient-Wise Pipeline")
-    parser.add_argument("-d", "--data_folder", type=str, default="emu_dataset")
-    parser.add_argument("-o", "--output_folder", type=str, default="ndd_results")
+    parser.add_argument(
+        "-d", 
+        "--data_folder", 
+        type=str, 
+        default="data/emu_dataset", 
+        help="Path to the emu_dataset folder (containing EEG Clips in EDF format seizure/ and interictal/)")
+    parser.add_argument("-o", "--output_folder", type=str, default="data/ndd_results")
     parser.add_argument(
         "-p",
         "--patient_info",
         type=str,
-        default="emu_dataset/dataset_admission_info.csv",
+        default="data/dataset_admission_info.csv",
     )
     parser.add_argument("-m", "--montage", type=str, default="all")
     parser.add_argument("--force", action="store_true")
@@ -487,14 +492,22 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(prob_folder, m), exist_ok=True)
 
     # Group by Patient
-    try:
-        all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
-        all_files = sorted(all_files)
-        if not all_files:
-            print(f"Warning: No .edf files found in {base_data_folder}")
-    except Exception as e:
-        print(f"Error finding EDF files: {e}")
+    if not os.path.isdir(base_data_folder):
+        print(
+            f"Warning: Data folder does not exist or is not a directory: {base_data_folder}. "
+            "Skipping Step 1.",
+            flush=True,
+        )
         all_files = []
+    else:
+        try:
+            all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
+            all_files = sorted(all_files)
+            if not all_files:
+                print(f"Warning: No .edf files found in {base_data_folder}")
+        except Exception as e:
+            print(f"Error finding EDF files: {e}")
+            all_files = []
 
     patient_map_files = {}
     for f in all_files:
@@ -528,7 +541,13 @@ if __name__ == "__main__":
             )
         )
 
-    Parallel(n_jobs=params["n_jobs"])(tqdm(all_tasks, desc="Processing patient"))
+    if all_tasks:
+        Parallel(n_jobs=params["n_jobs"])(tqdm(all_tasks, desc="Processing patient"))
+    else:
+        print(
+            "Skipping Step 1 (no EDF inputs). Continuing with Step 2 using existing probability CSVs if present.",
+            flush=True,
+        )
 
     # =================================================================
     # STEP 2: Generate Predictions

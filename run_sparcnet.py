@@ -380,21 +380,21 @@ if __name__ == "__main__":
         "-d",
         "--data_folder",
         type=str,
-        default="emu_dataset",
-        help="Path to the emu_dataset folder (containing seizure/ and interictal/)",
+        default="data/emu_dataset",
+        help="Path to the emu_dataset folder (containing EEG Clips in EDF format seizure/ and interictal/)",
     )
     parser.add_argument(
         "-o",
         "--output_folder",
         type=str,
-        default="sparcnet_results",
+        default="data/sparcnet_results",
         help="Main output folder for probs, preds, metrics, etc.",
     )
     parser.add_argument(
         "-p",
         "--patient_info",
         type=str,
-        default="emu_dataset/emu_patient_info.csv",
+        default="data/dataset_admission_info.csv",
         help="Path to emu_patient_info.csv",
     )
     parser.add_argument(
@@ -467,13 +467,20 @@ if __name__ == "__main__":
     for m in montage_keys:
         os.makedirs(os.path.join(prob_folder, m), exist_ok=True)
 
-    try:
-        all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
-        if not all_files:
-            print(f"Warning: No .edf files found in {base_data_folder}")
-    except Exception as e:
-        print(f"Error finding EDF files: {e}")
+    if not os.path.isdir(base_data_folder):
+        print(
+            f"Warning: Data folder does not exist or is not a directory: {base_data_folder}. "
+            "Skipping Step 1."
+        )
         all_files = []
+    else:
+        try:
+            all_files = glob.glob(f"{base_data_folder}/**/*.edf", recursive=True)
+            if not all_files:
+                print(f"Warning: No .edf files found in {base_data_folder}")
+        except Exception as e:
+            print(f"Error finding EDF files: {e}")
+            all_files = []
 
     if all_files:
         # Update globals for the parallel function
@@ -487,7 +494,9 @@ if __name__ == "__main__":
             )
             pbar.update(len(all_files))
     else:
-        print("Skipping Step 1, no files found.")
+        print(
+            "Skipping Step 1 (no EDF inputs). Continuing with Step 2 using existing probability CSVs if present."
+        )
 
     # =================================================================
     # STEP 2: Generate Predictions
