@@ -197,8 +197,8 @@ def patient_metrics(pred_file_df, stride):
     all_metrics = pd.concat(
         all_metrics, axis=0
     ).sort_index()  # this is per patient metrics
-    all_metrics[["precision_event", "f1_event"]] = all_metrics[
-        ["precision_event", "f1_event"]
+    all_metrics["f1_event"] = all_metrics[
+        ["f1_event"]
     ].fillna(0.0)
     return all_metrics
 
@@ -227,9 +227,9 @@ def calculate_metrics_for_montages(
 
             if full_metrics:
                 full_metrics = pd.concat(full_metrics, axis=0).sort_index()
-                full_metrics[["precision_event", "f1_event"]] = full_metrics[
-                    ["precision_event", "f1_event"]
-                ].fillna(0.0)
+                # full_metrics[["precision_event", "f1_event"]] = full_metrics[
+                #     ["precision_event", "f1_event"]
+                # ].fillna(0.0)
                 full_metrics.to_csv(segment_out_file)
 
         patient_out_file = os.path.join(metric_folder, montage, "patient_metrics.csv")
